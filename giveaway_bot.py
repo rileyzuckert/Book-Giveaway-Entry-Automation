@@ -60,7 +60,7 @@ TITLE_FUZZY = 0.92
 AUTHOR_FUZZY = 0.88
 NTFY_SERVER = (os.environ.get("NTFY_SERVER") or "https://ntfy.sh").rstrip("/")
 SUMMARY = (os.environ.get("NTFY_SUMMARY") or "1") != "0"   # weekly "I ran" heartbeat
-NTFY_TOPIC, NTFY_TOKEN = os.environ.get("giveaways-k7x2qm9vh4bt8wnz"), os.environ.get("NTFY_TOKEN")
+NTFY_TOPIC, NTFY_TOKEN = os.environ.get("NTFY_TOPIC"), os.environ.get("NTFY_TOKEN")
 PROFILE_DIR, STATE_FILE, LOG_FILE = "browser_profile", "state.json", "giveaway_bot.log"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
