@@ -211,6 +211,18 @@ def notify(site, title, authors, fmt, url, uncertain=False):
 
 def pause(a=2.5, b=5.5): time.sleep(random.uniform(a, b))
 
+def goto(page, url):
+    """page.goto(), but tolerant of a fast JS redirect aborting the navigation
+    (e.g. Goodreads sign-in bouncing straight to Amazon) before Playwright's
+    default 'load' wait finishes. Always waits for at least the DOM to be ready."""
+    try:
+        page.goto(url, wait_until="domcontentloaded")
+    except Exception as e:
+        if "ERR_ABORTED" in str(e):
+            log(f"  (goto redirected away from {url}, continuing at {page.url})")
+        else:
+            raise
+
 def blocked(page):
     txt = page.content().lower()
     return any(k in txt for k in ["captcha", "otp", "verification code", "solve this puzzle"])
@@ -227,8 +239,7 @@ def snapshot(page, name):
         log(f"  snapshot failed: {e}")
 
 def sg_login(page):
-    page.goto("https://app.thestorygraph.com/users/sign_in")
-    page.wait_for_load_state("domcontentloaded")
+    goto(page, "https://app.thestorygraph.com/users/sign_in")
     if "sign_in" not in page.url: return True            # already signed in
     if not (SG_EMAIL and SG_PASSWORD): log("StoryGraph: not logged in and no SG_EMAIL/SG_PASSWORD"); return False
     try:
@@ -258,13 +269,13 @@ def sg_login(page):
 def sg_scrape_tbr(page, tbr):
     user = SG_USERNAME
     if not user:
-        page.goto("https://app.thestorygraph.com/")
+        goto(page, "https://app.thestorygraph.com/")
         a = page.query_selector(SEL["sg_profile_link"])
         user = a.get_attribute("href").rstrip("/").split("/")[-1] if a else None
     if not user: log("StoryGraph: couldn't detect username (set SG_USERNAME)"); return
     seen, n0 = set(), len(tbr.items)
     for n in range(1, 60):
-        page.goto(f"https://app.thestorygraph.com/to-read/{user}?page={n}")
+        goto(page, f"https://app.thestorygraph.com/to-read/{user}?page={n}")
         panes = page.query_selector_all(SEL["sg_tbr_pane"])
         new = 0
         for p in panes:
@@ -285,12 +296,12 @@ def sg_collect(page):
         for a in page.query_selector_all(SEL["sg_giveaway_link"]):
             m = pat.search(a.get_attribute("href") or "")
             if m: urls.add("https://app.thestorygraph.com" + m.group(0))
-    page.goto("https://app.thestorygraph.com/"); page.wait_for_load_state("domcontentloaded")
+    goto(page, "https://app.thestorygraph.com/")
     for _ in range(4): page.mouse.wheel(0, 4000); time.sleep(1)     # home page giveaways sit at the bottom
     grab()
     for n in range(1, MAX_PAGES + 1):
         before = len(urls)
-        page.goto(f"https://app.thestorygraph.com/giveaways?page={n}")
+        goto(page, f"https://app.thestorygraph.com/giveaways?page={n}")
         for _ in range(3): page.mouse.wheel(0, 4000); time.sleep(0.8)
         grab()
         if len(urls) == before: break
@@ -307,7 +318,7 @@ def sg_country_ok(block):
     return bool(re.search(rf"(?<![A-Za-z-]){re.escape(MY_COUNTRY)}(?![A-Za-z-])", seg))
 
 def sg_process(page, url, tbr, live, entered):
-    page.goto(url); page.wait_for_load_state("domcontentloaded")
+    goto(page, url)
     t = page.query_selector(SEL["sg_title"])
     title = t.inner_text().strip() if t else ""
     authors = [a.inner_text() for a in page.query_selector_all(SEL["sg_author"])]
@@ -339,13 +350,13 @@ def sg_process(page, url, tbr, live, entered):
 
 # ---------------- GOODREADS ----------------
 def gr_logged_in(page):
-    page.goto("https://www.goodreads.com/"); page.wait_for_load_state("domcontentloaded")
+    goto(page, "https://www.goodreads.com/")
     return page.query_selector(SEL["gr_signed_in"]) is not None
 
 def gr_login(page):
     if gr_logged_in(page): return True
     if not (GR_EMAIL and GR_PASSWORD): log("Goodreads: not logged in and no GR_EMAIL/GR_PASSWORD"); return False
-    page.goto("https://www.goodreads.com/user/sign_in"); page.wait_for_load_state("domcontentloaded")
+    goto(page, "https://www.goodreads.com/user/sign_in")
     e = page.query_selector(SEL["gr_email_signin"])
     if e: e.click(); page.wait_for_load_state("domcontentloaded")
     try:
@@ -360,7 +371,7 @@ def gr_login(page):
 def gr_scrape_tbr(page, tbr):
     n0 = len(tbr.items); seen = set()
     for n in range(1, 60):
-        page.goto(f"https://www.goodreads.com/review/list?shelf=to-read&per_page=100&page={n}")
+        goto(page, f"https://www.goodreads.com/review/list?shelf=to-read&per_page=100&page={n}")
         rows = page.query_selector_all(SEL["gr_tbr_row"])
         new = 0
         for r in rows:
@@ -378,7 +389,7 @@ def gr_scrape_tbr(page, tbr):
 def gr_collect(page):
     urls = set()
     for n in range(1, MAX_PAGES + 1):
-        page.goto(f"https://www.goodreads.com/giveaway?sort=ending_soon&page={n}")
+        goto(page, f"https://www.goodreads.com/giveaway?sort=ending_soon&page={n}")
         links = page.query_selector_all(SEL["gr_giveaway_link"])
         if not links: break
         for a in links:
@@ -403,7 +414,7 @@ def gr_country_ok(text):
 
 def gr_process(page, url, tbr, live, entered):
     if f"gr:{url}" in entered: return f"skip (already entered): {url}"
-    page.goto(url); page.wait_for_load_state("domcontentloaded")
+    goto(page, url)
     h1 = page.query_selector(SEL["gr_title"]); title = h1.inner_text().strip() if h1 else ""
     authors = [a.inner_text() for a in page.query_selector_all(SEL["gr_author"])][:3]
     body = page.inner_text("body")
