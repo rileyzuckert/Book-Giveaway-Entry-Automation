@@ -25,7 +25,10 @@ SETUP
   Optional (auto-updates): SELECTORS_URL = raw URL of a selectors.json in your GitHub repo.
     Each run the bot fetches it, so if a site changes its layout you fix selectors.json once and
     every install picks it up. It also alerts you (via ntfy) when it detects breakage or a new version.
-    PLATFORMS = "goodreads,storygraph" (default) or just "storygraph".
+    PLATFORMS = "storygraph" (default). Set to "goodreads,storygraph" to include Goodreads too
+                              (Goodreads logs in via Amazon, which is more prone to CAPTCHAs/2FA
+                              than StoryGraph's own login - expect it to need occasional manual
+                              attention via --headed if you turn it back on).
 
   FIRST RUN (once, with a visible browser, so you can solve any captcha / 2FA):
       python giveaway_bot.py --headed --live --once
@@ -50,7 +53,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 # ---------------- CONFIG ----------------
 VERSION = "1.1.0"
 MY_COUNTRY = os.environ.get("MY_COUNTRY") or "United States"
-PLATFORMS = (os.environ.get("PLATFORMS") or "goodreads,storygraph").lower()
+PLATFORMS = (os.environ.get("PLATFORMS") or "storygraph").lower()   # add "goodreads" back if you want it later
 GR_EMAIL, GR_PASSWORD = os.environ.get("GR_EMAIL"), os.environ.get("GR_PASSWORD")
 SG_EMAIL, SG_PASSWORD = os.environ.get("SG_EMAIL"), os.environ.get("SG_PASSWORD")
 SG_USERNAME = os.environ.get("SG_USERNAME")   # optional; auto-detected if blank
@@ -381,9 +384,11 @@ def gr_login(page):
         page.fill(SEL["gr_amazon_email"], GR_EMAIL); page.fill(SEL["gr_amazon_password"], GR_PASSWORD)
         page.click(SEL["gr_amazon_submit"]); page.wait_for_load_state("domcontentloaded"); pause()
     except Exception as ex:
-        log(f"Goodreads login form not found: {ex}"); return False
+        snapshot(page, "gr_login_amazon_form_not_found")
+        log(f"Goodreads login form not found: {ex}. See debug/gr_login_amazon_form_not_found.*"); return False
     if blocked(page) or not gr_logged_in(page):
-        log("Goodreads login blocked (captcha/2FA?). Run once with --headed to sign in manually."); return False
+        snapshot(page, "gr_login_blocked")
+        log("Goodreads login blocked (captcha/2FA?). See debug/gr_login_blocked.*"); return False
     return True
 
 def gr_scrape_tbr(page, tbr):
