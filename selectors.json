@@ -14,6 +14,7 @@
   "sg_email_field": "#user_email",
   "sg_password_field": "#user_password",
   "sg_login_submit": "input[type=submit], button[type=submit]",
+  "sg_cookie_accept": "button:has-text('Accept and close'), button:has-text('Accept'), #onetrust-accept-btn-handler",
   "gr_signed_in": "a[href*='sign_out']",
   "gr_email_signin": "text=Sign in with email",
   "gr_amazon_email": "#ap_email",
