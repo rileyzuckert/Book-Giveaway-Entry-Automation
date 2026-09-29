@@ -80,6 +80,7 @@ DEFAULT_SEL = {
  "sg_email_field": "#user_email",
  "sg_password_field": "#user_password",
  "sg_login_submit": "input[type=submit], button[type=submit]",
+ "sg_cookie_accept": "button:has-text('Accept and close'), button:has-text('Accept'), #onetrust-accept-btn-handler",
  "gr_signed_in": "a[href*='sign_out']",
  "gr_email_signin": "text=Sign in with email",
  "gr_amazon_email": "#ap_email",
@@ -219,6 +220,11 @@ def sg_login(page):
     page.goto("https://app.thestorygraph.com/users/sign_in"); page.wait_for_load_state("domcontentloaded")
     if "sign_in" not in page.url: return True                  # already signed in
     if not (SG_EMAIL and SG_PASSWORD): log("StoryGraph: not logged in and no SG_EMAIL/SG_PASSWORD"); return False
+    try:
+        cookie_btn = page.query_selector(SEL["sg_cookie_accept"])
+        if cookie_btn and cookie_btn.is_visible(): cookie_btn.click(); pause(0.5, 1)
+    except Exception as e:
+        log(f"  (cookie banner dismiss failed, continuing anyway: {e})")
     page.fill(SEL["sg_email_field"], SG_EMAIL); page.fill(SEL["sg_password_field"], SG_PASSWORD)
     page.click(SEL["sg_login_submit"]); page.wait_for_load_state("domcontentloaded"); pause()
     ok = "sign_in" not in page.url
