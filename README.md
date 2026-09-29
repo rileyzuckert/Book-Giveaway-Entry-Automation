@@ -15,4 +15,4 @@ giveaways.yml is a GitHub Actions schedule. It lets GitHub run the script every 
 # Ntfy Setup
 1. Install ntfy app
 2. Pick a long, random topic name and subscribe to it in the app. The topic name works like a password. Anyone who guesses it can read your notifications.
-3. Set an environment variable to that same name
+3. Set an environment variable to that same name in giveaway_bot.py
