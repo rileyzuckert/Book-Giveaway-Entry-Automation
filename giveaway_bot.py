@@ -269,10 +269,11 @@ def sg_login(page):
     except Exception as e:
         log(f"  (cookie banner dismiss failed, continuing anyway: {e})")
     try:
-        page.wait_for_selector(SEL["sg_email_field"], state="visible", timeout=30000)
+        log("  waiting up to 2 minutes for the sign-in form (solve any verification/CAPTCHA now if shown)...")
+        page.wait_for_selector(SEL["sg_email_field"], state="visible", timeout=120000)
     except PWTimeout:
         snapshot(page, "sg_login_email_not_found")
-        log("StoryGraph: email field never became visible; see debug/sg_login_email_not_found.*")
+        log("StoryGraph: email field never became visible after 2 minutes; see debug/sg_login_email_not_found.*")
         return False
     page.fill(SEL["sg_email_field"], SG_EMAIL); page.fill(SEL["sg_password_field"], SG_PASSWORD)
     page.click(SEL["sg_login_submit"])
@@ -280,7 +281,10 @@ def sg_login(page):
         page.wait_for_load_state("domcontentloaded")
     except PWTimeout:
         pass
-    pause()
+    # give a second verification step (if StoryGraph shows one after credentials) time to be solved by hand
+    for _ in range(30):
+        if "sign_in" not in page.url: break
+        time.sleep(3)
     ok = "sign_in" not in page.url
     if not ok:
         snapshot(page, "sg_login_failed")
