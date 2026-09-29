@@ -1,4 +1,4 @@
-# Book-Giveaway-Entry-Automation
+# Book Giveaway Entry Automation
 This code scrapes Goodreads and StoryGraph on a weekly basis and enters the user into any relevant print giveaways matching books on their to-be read lists. It also sends the user recurring notifications (separate, free installation) regarding entries, along with bug alerts.
 
 giveaway_bot.py is the main script, running 1x per week. It logs into the user's Goodreads and StoryGraph accounts and scans their to-read shelves. It then checks against every open giveaway across both sites and enters only the ones that meet the following criteria: 
@@ -15,4 +15,9 @@ giveaways.yml is a GitHub Actions schedule. It lets GitHub run the script every 
 # Ntfy Setup
 1. Install ntfy app
 2. Pick a long, random topic name and subscribe to it in the app. The topic name works like a password. Anyone who guesses it can read your notifications.
-3. Set an environment variable to that same name in giveaway_bot.py
+3. Set an environment variable to that same name in Secrets
+
+# Secrets Setup
+1. Go to the Settings tab for the GitHub repo
+2. In the left sidebar, click 'Secrets and variables,' then click 'Actions'
+3. Add each secret
