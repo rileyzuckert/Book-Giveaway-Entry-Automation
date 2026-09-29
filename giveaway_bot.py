@@ -228,7 +228,7 @@ def snapshot(page, name):
 
 def sg_login(page):
     page.goto("https://app.thestorygraph.com/users/sign_in")
-    page.wait_for_load_state("networkidle")             # wait for the JS app to finish rendering, not just the HTML shell
+    page.wait_for_load_state("domcontentloaded")
     if "sign_in" not in page.url: return True            # already signed in
     if not (SG_EMAIL and SG_PASSWORD): log("StoryGraph: not logged in and no SG_EMAIL/SG_PASSWORD"); return False
     try:
@@ -243,7 +243,12 @@ def sg_login(page):
         log("StoryGraph: email field never became visible; see debug/sg_login_email_not_found.*")
         return False
     page.fill(SEL["sg_email_field"], SG_EMAIL); page.fill(SEL["sg_password_field"], SG_PASSWORD)
-    page.click(SEL["sg_login_submit"]); page.wait_for_load_state("networkidle"); pause()
+    page.click(SEL["sg_login_submit"])
+    try:
+        page.wait_for_load_state("domcontentloaded")
+    except PWTimeout:
+        pass
+    pause()
     ok = "sign_in" not in page.url
     if not ok:
         snapshot(page, "sg_login_failed")
@@ -430,8 +435,8 @@ def run_once(live, headed):
     with sync_playwright() as pw:
         ctx = pw.chromium.launch_persistent_context(PROFILE_DIR, headless=not headed,
                                                     viewport={"width": 1280, "height": 900})
+        page = ctx.new_page(); page.set_default_timeout(20000)
         try:
-            page = ctx.new_page(); page.set_default_timeout(20000)
             sg_ok = sg_login(page) if want_sg else False
             gr_ok = gr_login(page) if want_gr else False
             if want_sg and not sg_ok: problem("StoryGraph login failed (credentials/captcha?)")
@@ -470,6 +475,9 @@ def run_once(live, headed):
             if STATS["inspected"] >= 5 and STATS["unreadable"] / STATS["inspected"] >= 0.5:
                 problem(f"Couldn't read title/author on {STATS['unreadable']} of {STATS['inspected']} giveaway pages. "
                         "Selectors likely need updating.")
+        except Exception:
+            snapshot(page, "run_crash")   # whatever broke, get a picture of what the browser saw at that moment
+            raise
         finally:
             ctx.close()
     if STATS["problems"]:
