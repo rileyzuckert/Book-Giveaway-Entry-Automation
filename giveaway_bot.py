@@ -216,19 +216,38 @@ def blocked(page):
     return any(k in txt for k in ["captcha", "otp", "verification code", "solve this puzzle"])
 
 # ---------------- STORYGRAPH ----------------
+def snapshot(page, name):
+    """Save a screenshot + HTML for debugging when something can't be found. Never raises."""
+    try:
+        Path("debug").mkdir(exist_ok=True)
+        page.screenshot(path=f"debug/{name}.png", full_page=True)
+        Path(f"debug/{name}.html").write_text(page.content(), encoding="utf-8")
+        log(f"  saved debug/{name}.png and debug/{name}.html")
+    except Exception as e:
+        log(f"  snapshot failed: {e}")
+
 def sg_login(page):
-    page.goto("https://app.thestorygraph.com/users/sign_in"); page.wait_for_load_state("domcontentloaded")
-    if "sign_in" not in page.url: return True                  # already signed in
+    page.goto("https://app.thestorygraph.com/users/sign_in")
+    page.wait_for_load_state("networkidle")             # wait for the JS app to finish rendering, not just the HTML shell
+    if "sign_in" not in page.url: return True            # already signed in
     if not (SG_EMAIL and SG_PASSWORD): log("StoryGraph: not logged in and no SG_EMAIL/SG_PASSWORD"); return False
     try:
         cookie_btn = page.query_selector(SEL["sg_cookie_accept"])
         if cookie_btn and cookie_btn.is_visible(): cookie_btn.click(); pause(0.5, 1)
     except Exception as e:
         log(f"  (cookie banner dismiss failed, continuing anyway: {e})")
+    try:
+        page.wait_for_selector(SEL["sg_email_field"], state="visible", timeout=30000)
+    except PWTimeout:
+        snapshot(page, "sg_login_email_not_found")
+        log("StoryGraph: email field never became visible; see debug/sg_login_email_not_found.*")
+        return False
     page.fill(SEL["sg_email_field"], SG_EMAIL); page.fill(SEL["sg_password_field"], SG_PASSWORD)
-    page.click(SEL["sg_login_submit"]); page.wait_for_load_state("domcontentloaded"); pause()
+    page.click(SEL["sg_login_submit"]); page.wait_for_load_state("networkidle"); pause()
     ok = "sign_in" not in page.url
-    if not ok: log("StoryGraph login failed (bad creds or captcha). Run once with --headed.")
+    if not ok:
+        snapshot(page, "sg_login_failed")
+        log("StoryGraph login failed (bad creds or captcha). See debug/sg_login_failed.*")
     return ok
 
 def sg_scrape_tbr(page, tbr):
