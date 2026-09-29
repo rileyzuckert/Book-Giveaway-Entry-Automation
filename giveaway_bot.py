@@ -214,7 +214,9 @@ def pause(a=2.5, b=5.5): time.sleep(random.uniform(a, b))
 def goto(page, url):
     """page.goto(), but tolerant of a fast JS redirect aborting the navigation
     (e.g. Goodreads sign-in bouncing straight to Amazon) before Playwright's
-    default 'load' wait finishes. Always waits for at least the DOM to be ready."""
+    default 'load' wait finishes. Always waits for at least the DOM to be ready,
+    then gives any secondary redirect a moment to settle before returning, so
+    callers don't try to read the page mid-navigation."""
     try:
         page.goto(url, wait_until="domcontentloaded")
     except Exception as e:
@@ -222,6 +224,22 @@ def goto(page, url):
             log(f"  (goto redirected away from {url}, continuing at {page.url})")
         else:
             raise
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=5000)
+    except Exception:
+        pass   # no further navigation happened, or it also got aborted by yet another redirect - fine either way
+    time.sleep(1)
+
+def safe_query(page, selector):
+    """page.query_selector(), retried once if the page navigates out from under it."""
+    for attempt in range(2):
+        try:
+            return page.query_selector(selector)
+        except Exception as e:
+            if "context was destroyed" in str(e).lower() or "execution context" in str(e).lower():
+                log("  (page navigated mid-query, retrying)"); time.sleep(1); continue
+            raise
+    return None
 
 def blocked(page):
     txt = page.content().lower()
@@ -243,7 +261,7 @@ def sg_login(page):
     if "sign_in" not in page.url: return True            # already signed in
     if not (SG_EMAIL and SG_PASSWORD): log("StoryGraph: not logged in and no SG_EMAIL/SG_PASSWORD"); return False
     try:
-        cookie_btn = page.query_selector(SEL["sg_cookie_accept"])
+        cookie_btn = safe_query(page, SEL["sg_cookie_accept"])
         if cookie_btn and cookie_btn.is_visible(): cookie_btn.click(); pause(0.5, 1)
     except Exception as e:
         log(f"  (cookie banner dismiss failed, continuing anyway: {e})")
@@ -351,13 +369,13 @@ def sg_process(page, url, tbr, live, entered):
 # ---------------- GOODREADS ----------------
 def gr_logged_in(page):
     goto(page, "https://www.goodreads.com/")
-    return page.query_selector(SEL["gr_signed_in"]) is not None
+    return safe_query(page, SEL["gr_signed_in"]) is not None
 
 def gr_login(page):
     if gr_logged_in(page): return True
     if not (GR_EMAIL and GR_PASSWORD): log("Goodreads: not logged in and no GR_EMAIL/GR_PASSWORD"); return False
     goto(page, "https://www.goodreads.com/user/sign_in")
-    e = page.query_selector(SEL["gr_email_signin"])
+    e = safe_query(page, SEL["gr_email_signin"])
     if e: e.click(); page.wait_for_load_state("domcontentloaded")
     try:
         page.fill(SEL["gr_amazon_email"], GR_EMAIL); page.fill(SEL["gr_amazon_password"], GR_PASSWORD)
