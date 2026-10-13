@@ -351,12 +351,31 @@ def sg_country_ok(block):
     seg = m.group(1) if m else ""
     return bool(re.search(rf"(?<![A-Za-z-]){re.escape(MY_COUNTRY)}(?![A-Za-z-])", seg))
 
+_snapshotted_unreadable = [False]
+
+def sg_authors_from_heading(t, title):
+    """On a giveaway page the heading reads '<Title> by <Author A>, <Author B>' with the author as
+    plain text (not a link). Pull the author(s) from the heading text after the title."""
+    try:
+        full = t.evaluate("e => ((e.closest('h1,h2,h3') || e.parentElement).innerText || '')")
+    except Exception:
+        return []
+    full = re.sub(r"\s+", " ", full).strip()
+    rest = full.replace(title, "", 1).strip() if title in full else full
+    rest = re.sub(r"^by\s+", "", rest, flags=re.I).strip()
+    if not rest or rest == full: return []
+    return [a.strip() for a in re.split(r",|&|\band\b", rest) if a.strip()]
+
 def sg_process(page, url, tbr, live, entered):
     goto(page, url)
     t = page.query_selector(SEL["sg_title"])
-    title = t.inner_text().strip() if t else ""
-    authors = [a.inner_text() for a in page.query_selector_all(SEL["sg_author"])]
-    if not title or not authors: return f"skip (couldn't read title/author): {url}"
+    title = re.sub(r"\s+", " ", t.inner_text()).strip() if t else ""
+    authors = sg_authors_from_heading(t, title) if t else []
+    authors += [a.inner_text() for a in page.query_selector_all(SEL["sg_author"])]   # in case author links exist too
+    if not title or not authors:
+        if not _snapshotted_unreadable[0]:
+            _snapshotted_unreadable[0] = True; snapshot(page, "sg_giveaway_unreadable")
+        return f"skip (couldn't read title/author): {url}"
     if not tbr.matches(title, authors): return f"skip (not on TBR): {title} / {authors}"
 
     btns = page.query_selector_all(SEL["sg_enter"])
