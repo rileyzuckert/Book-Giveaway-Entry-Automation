@@ -165,6 +165,11 @@ class Tbr:
     def add(self, title, authors):
         if title:
             self.items.append((norm_title(title), [norm_author(a) for a in authors if a.strip()]))
+    def near(self, title):
+        """Shelf entries whose title is similar to this one (for diagnosing why a match failed)."""
+        t = norm_title(title)
+        return [(tt, ta) for tt, ta in self.items
+                if tt == t or difflib.SequenceMatcher(None, tt, t).ratio() >= 0.8]
     def matches(self, title, authors):
         t = norm_title(title); auths = [norm_author(a) for a in authors]
         for tt, tauths in self.items:
@@ -259,6 +264,14 @@ def snapshot(page, name):
     except Exception as e:
         log(f"  snapshot failed: {e}")
 
+def dismiss_cookies(page):
+    """Clear StoryGraph's cookie banner if it's showing; it can sit on top of buttons and block clicks."""
+    try:
+        b = safe_query(page, SEL["sg_cookie_accept"])
+        if b and b.is_visible(): b.click(timeout=3000); time.sleep(0.5)
+    except Exception:
+        pass
+
 def sg_login(page, headed=False):
     goto(page, "https://app.thestorygraph.com/users/sign_in")
     if "sign_in" not in page.url: return True            # already signed in
@@ -352,6 +365,7 @@ def sg_country_ok(block):
     return bool(re.search(rf"(?<![A-Za-z-]){re.escape(MY_COUNTRY)}(?![A-Za-z-])", seg))
 
 _snapshotted_unreadable = [False]
+_snapshotted_timeout = [False]
 
 def sg_authors_from_heading(t, title):
     """On a giveaway page the heading reads '<Title> by <Author A>, <Author B>' with the author as
@@ -376,7 +390,10 @@ def sg_process(page, url, tbr, live, entered):
         if not _snapshotted_unreadable[0]:
             _snapshotted_unreadable[0] = True; snapshot(page, "sg_giveaway_unreadable")
         return f"skip (couldn't read title/author): {url}"
-    if not tbr.matches(title, authors): return f"skip (not on TBR): {title} / {authors}"
+    if not tbr.matches(title, authors):
+        nr = tbr.near(title)
+        extra = f"  [similar title on your shelf but author differs: {nr}]" if nr else ""
+        return f"skip (not on TBR): {title} / {authors}{extra}"
 
     btns = page.query_selector_all(SEL["sg_enter"])
     if not btns: return f"skip (no enter button: closed/entered/ineligible): {title}"
@@ -389,16 +406,38 @@ def sg_process(page, url, tbr, live, entered):
         if key in entered:      return f"skip (already entered): {title}"
         if not sg_country_ok(block): log(f"  skip prize (not eligible in {MY_COUNTRY}): {title}"); continue
         if not live: return f"WOULD ENTER (StoryGraph, print): {title} {url}"
-        btn.click(); page.wait_for_load_state("domcontentloaded"); time.sleep(2)
-        confirm = page.query_selector(SEL["sg_confirm"])
-        if confirm: confirm.click(); time.sleep(2)
+        step = "clearing cookie banner"
+        try:
+            dismiss_cookies(page)
+            step = "clicking Enter"
+            btn.scroll_into_view_if_needed(timeout=8000)
+            try:
+                btn.click(timeout=8000)
+            except PWTimeout:
+                log("  normal click was blocked or timed out; trying a direct click instead")
+                btn.evaluate("e => e.click()")
+            step = "waiting after click"
+            try: page.wait_for_load_state("domcontentloaded", timeout=8000)
+            except PWTimeout: pass
+            time.sleep(2)
+            step = "confirming"
+            confirm = safe_query(page, SEL["sg_confirm"])
+            if confirm and confirm.is_visible():
+                same = confirm.evaluate("(e, b) => e === b", btn)          # never re-click the Enter button itself
+                txt = (confirm.inner_text() or "").lower()
+                if not same and "enter giveaway" not in txt:
+                    confirm.click(timeout=8000); time.sleep(2)
+        except Exception as e:
+            snapshot(page, "sg_enter_failed")
+            return f"FAILED while {step} ({type(e).__name__}): {title} {url} -> see debug/sg_enter_failed.*"
         body = page.inner_text("body").lower()
         if "entered" in body or "good luck" in body or "you're in" in body:
             entered.add(key); save_state(entered)
             notify("StoryGraph", title, authors, "Print", url)
             return f"ENTERED (StoryGraph): {title} {url}"
+        snapshot(page, "sg_enter_uncertain")
         notify("StoryGraph", title, authors, "Print", url, uncertain=True)
-        return f"UNCERTAIN (clicked enter, no confirmation text seen; check manually): {title} {url}"
+        return f"UNCERTAIN (clicked enter, no confirmation text seen; check manually; see debug/sg_enter_uncertain.*): {title} {url}"
     return f"skip (no eligible print prize): {title}"
 
 # ---------------- GOODREADS ----------------
@@ -535,7 +574,9 @@ def run_once(live, headed):
                     result = fn(page, url, tbr, live, entered); log(result)
                     if result.startswith("skip (couldn't read"): STATS["unreadable"] += 1
                     if result.startswith(("ENTERED", "WOULD ENTER")): STATS["entered"] += 1
-                except PWTimeout: log(f"timeout: {url}")
+                except PWTimeout:
+                    log(f"timeout: {url}")
+                    if not _snapshotted_timeout[0]: _snapshotted_timeout[0] = True; snapshot(page, "item_timeout")
                 except Exception as e: log(f"error on {url}: {e}")
                 pause()
             if STATS["inspected"] >= 5 and STATS["unreadable"] / STATS["inspected"] >= 0.5:
