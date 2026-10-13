@@ -259,7 +259,7 @@ def snapshot(page, name):
     except Exception as e:
         log(f"  snapshot failed: {e}")
 
-def sg_login(page):
+def sg_login(page, headed=False):
     goto(page, "https://app.thestorygraph.com/users/sign_in")
     if "sign_in" not in page.url: return True            # already signed in
     if not (SG_EMAIL and SG_PASSWORD): log("StoryGraph: not logged in and no SG_EMAIL/SG_PASSWORD"); return False
@@ -268,12 +268,19 @@ def sg_login(page):
         if cookie_btn and cookie_btn.is_visible(): cookie_btn.click(); pause(0.5, 1)
     except Exception as e:
         log(f"  (cookie banner dismiss failed, continuing anyway: {e})")
+
+    # A human watching (--headed) can take as long as they need to solve a checkbox/CAPTCHA;
+    # an unattended run has nobody to solve anything, so it should fail fast instead of hanging for minutes.
+    field_timeout_ms = 600_000 if headed else 30_000     # 10 min headed, 30s unattended
+    second_step_checks = 200 if headed else 10           # 10 min headed (3s each), 30s unattended
+
     try:
-        log("  waiting up to 2 minutes for the sign-in form (solve any verification/CAPTCHA now if shown)...")
-        page.wait_for_selector(SEL["sg_email_field"], state="visible", timeout=120000)
+        if headed:
+            log("  waiting up to 10 minutes for you to sign in / solve any verification - take your time...")
+        page.wait_for_selector(SEL["sg_email_field"], state="visible", timeout=field_timeout_ms)
     except PWTimeout:
         snapshot(page, "sg_login_email_not_found")
-        log("StoryGraph: email field never became visible after 2 minutes; see debug/sg_login_email_not_found.*")
+        log(f"StoryGraph: email field never became visible; see debug/sg_login_email_not_found.*")
         return False
     page.fill(SEL["sg_email_field"], SG_EMAIL); page.fill(SEL["sg_password_field"], SG_PASSWORD)
     page.click(SEL["sg_login_submit"])
@@ -282,7 +289,9 @@ def sg_login(page):
     except PWTimeout:
         pass
     # give a second verification step (if StoryGraph shows one after credentials) time to be solved by hand
-    for _ in range(30):
+    if headed:
+        log("  if another verification step appears now, you have up to 10 more minutes to solve it...")
+    for _ in range(second_step_checks):
         if "sign_in" not in page.url: break
         time.sleep(3)
     ok = "sign_in" not in page.url
@@ -475,7 +484,7 @@ def run_once(live, headed):
                                                     viewport={"width": 1280, "height": 900})
         page = ctx.new_page(); page.set_default_timeout(20000)
         try:
-            sg_ok = sg_login(page) if want_sg else False
+            sg_ok = sg_login(page, headed=headed) if want_sg else False
             gr_ok = gr_login(page) if want_gr else False
             if want_sg and not sg_ok: problem("StoryGraph login failed (credentials/captcha?)")
             if want_gr and not gr_ok: problem("Goodreads login failed (captcha/2FA/blocked?)")
