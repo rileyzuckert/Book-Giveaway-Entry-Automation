@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.giveawaybot.weekly</string>
+
+    <!-- What to run: Python, then the bot, then the words "live" and "once" (really enter, run one time).
+         The README's steps fill in the REPLACE_ words for you. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>REPLACE_WITH_PYTHON</string>
+        <string>REPLACE_WITH_HOME/giveaway-bot/giveaway_bot.py</string>
+        <string>--live</string>
+        <string>--once</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>REPLACE_WITH_HOME/giveaway-bot</string>
+
+    <!-- When to run: every Monday at 9:00 AM (Weekday: 1=Mon ... 7=Sun).
+         If the Mac is asleep then, it runs when it wakes up. If it's fully switched off, that week is skipped. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- Where to write messages from the scheduler itself (the bot's own log is giveaway_bot.log) -->
+    <key>StandardOutPath</key>
+    <string>REPLACE_WITH_HOME/giveaway-bot/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>REPLACE_WITH_HOME/giveaway-bot/launchd.err.log</string>
+</dict>
+</plist>
