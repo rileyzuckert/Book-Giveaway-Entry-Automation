@@ -8,7 +8,7 @@ open giveaway, and enters the ones that pass ALL of these checks:
   3. Your country is on the prize's eligible-countries list.
 Every time it enters a giveaway, it sends a push notification to your phone through ntfy.
 
-SETTINGS (set these as environment variables, for example in your .env file):
+SETTINGS (put these in a file named .env in this folder, one per line, like SG_EMAIL=you@example.com):
   SG_EMAIL, SG_PASSWORD    your StoryGraph login
   NTFY_TOPIC               your private ntfy topic name
   MY_COUNTRY               for example "United States" (this is the default)
@@ -18,7 +18,7 @@ SETTINGS (set these as environment variables, for example in your .env file):
   NTFY_SUMMARY=0           turn off the weekly "run finished" message
   SELECTORS_URL            link to an online selectors.json, so layout fixes can be picked up automatically
 
-HOW TO RUN (from the folder that holds this file):
+HOW TO RUN (from the folder that holds this file; on Windows use "py" instead of "python3"):
   Dry run (nothing is entered):    python3 giveaway_bot.py --headed --once
   Real run, watch the browser:     python3 giveaway_bot.py --live --headed --once
   Real run, hidden browser:        python3 giveaway_bot.py --live --once
@@ -35,10 +35,31 @@ import argparse, csv, difflib, json, logging, os, random, re, time, urllib.reque
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
+# Always work inside the folder that holds this script, no matter where it was started from.
+# (This matters when a scheduler starts the bot, because schedulers often start it somewhere else.)
+SCRIPT_FOLDER = Path(__file__).resolve().parent
+os.chdir(SCRIPT_FOLDER)
+
+def load_settings_file():
+    """Read your settings from a file named .env in this folder (if it exists).
+    Each line looks like NAME=value. Lines starting with # are ignored.
+    A setting that is already set on your computer is left alone."""
+    env_file = SCRIPT_FOLDER / ".env"
+    if not env_file.exists(): return
+    for line in env_file.read_text(encoding="utf-8-sig").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line: continue
+        name, value = line.split("=", 1)
+        name, value = name.strip(), value.strip().strip('"').strip("'")
+        if name and name not in os.environ:
+            os.environ[name] = value
+
+load_settings_file()
+
 # =====================================================================
 # SETTINGS
 # =====================================================================
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 SG_EMAIL = os.environ.get("SG_EMAIL")
 SG_PASSWORD = os.environ.get("SG_PASSWORD")
 SG_USERNAME = os.environ.get("SG_USERNAME")                  # optional
