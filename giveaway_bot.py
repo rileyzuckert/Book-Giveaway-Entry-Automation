@@ -1,76 +1,78 @@
 """
-Goodreads + StoryGraph giveaway auto-enterer (runs unattended).
+StoryGraph Giveaway Bot
+=======================
+Each time it runs, this script logs in to StoryGraph, reads your to-read shelf, looks at every
+open giveaway, and enters the ones that pass ALL of these checks:
+  1. The book (title AND author) is on your to-read shelf. Which edition you added doesn't matter.
+  2. The prize is a PRINT copy (not digital or audio).
+  3. Your country is on the prize's eligible-countries list.
+Every time it enters a giveaway, it sends a push notification to your phone through ntfy.
 
-Enters a giveaway only if ALL are true:
-  1. you're eligible (prize's eligible-country list includes yours / an Enter button is offered)
-  2. the prize is PRINT (not digital/audio)
-  3. the book matches something on your to-read shelf by TITLE *and* AUTHOR
-     (edition doesn't matter: a digital copy on your shelf still matches a print giveaway)
+SETTINGS (set these as environment variables, for example in your .env file):
+  SG_EMAIL, SG_PASSWORD    your StoryGraph login
+  NTFY_TOPIC               your private ntfy topic name
+  MY_COUNTRY               for example "United States" (this is the default)
+  --- optional ---
+  SG_USERNAME              your StoryGraph username (found automatically if you leave it blank)
+  NTFY_SERVER, NTFY_TOKEN  only needed for a self-hosted or reserved ntfy topic
+  NTFY_SUMMARY=0           turn off the weekly "run finished" message
+  SELECTORS_URL            link to an online selectors.json, so layout fixes can be picked up automatically
 
-SETUP
-  pip install playwright && playwright install chromium
+HOW TO RUN (from the folder that holds this file):
+  Dry run (nothing is entered):    python3 giveaway_bot.py --headed --once
+  Real run, watch the browser:     python3 giveaway_bot.py --live --headed --once
+  Real run, hidden browser:        python3 giveaway_bot.py --live --once
+  Test the phone notification:     python3 giveaway_bot.py --test-notify
+The first time, use --headed so you can sign in and click any "I'm not a robot" box yourself.
+Your login is then saved in the "browser_profile" folder and reused on later runs.
 
-  Credentials (environment variables, so they're not hard-coded):
-    GR_EMAIL, GR_PASSWORD     Goodreads (Amazon login)
-    SG_EMAIL, SG_PASSWORD     StoryGraph
-    MY_COUNTRY                e.g. "United States" (default)
-
-  Push notifications via ntfy (sent each time a giveaway is entered):
-    NTFY_TOPIC                a long, random, private topic name (it acts like a password;
-                              anyone who knows it can read your notifications)
-    NTFY_SERVER (optional)    default https://ntfy.sh
-    NTFY_TOKEN  (optional)    access token, if you self-host or reserved your topic
-  Install the ntfy app on your phone and subscribe to that same topic.
-
-  Optional (auto-updates): SELECTORS_URL = raw URL of a selectors.json in your GitHub repo.
-    Each run the bot fetches it, so if a site changes its layout you fix selectors.json once and
-    every install picks it up. It also alerts you (via ntfy) when it detects breakage or a new version.
-    PLATFORMS = "storygraph" (default). Set to "goodreads,storygraph" to include Goodreads too
-                              (Goodreads logs in via Amazon, which is more prone to CAPTCHAs/2FA
-                              than StoryGraph's own login - expect it to need occasional manual
-                              attention via --headed if you turn it back on).
-
-  FIRST RUN (once, with a visible browser, so you can solve any captcha / 2FA):
-      python giveaway_bot.py --headed --live --once
-  The login session is saved in ./browser_profile and reused headlessly afterward.
-
-  UNATTENDED:
-      python giveaway_bot.py --live --daemon      (runs weekly; change with --every-hours)
-  (or schedule `python giveaway_bot.py --live --once` with cron / Task Scheduler)
-
-  Without --live it's a dry run: it logs what it WOULD enter.
-
-OPTIONAL: goodreads_library_export.csv / storygraph_export.csv in this folder are
-merged into your to-read list as a fallback if scraping your shelves comes up short.
-
-Output: giveaway_bot.log (everything) and state.json (giveaways already entered).
-The CSS selectors are best guesses; check the log on the first dry run.
+FILES IT CREATES:
+  giveaway_bot.log   a record of everything it did, and why it skipped each giveaway
+  state.json         the giveaways already entered (so it never enters the same one twice)
+  debug/             screenshots saved when something goes wrong
 """
-import argparse, csv, difflib, json, logging, os, random, re, sys, time, urllib.request
+import argparse, csv, difflib, json, logging, os, random, re, time, urllib.request
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-# ---------------- CONFIG ----------------
-VERSION = "1.1.0"
+# =====================================================================
+# SETTINGS
+# =====================================================================
+VERSION = "1.2.0"
+SG_EMAIL = os.environ.get("SG_EMAIL")
+SG_PASSWORD = os.environ.get("SG_PASSWORD")
+SG_USERNAME = os.environ.get("SG_USERNAME")                  # optional
 MY_COUNTRY = os.environ.get("MY_COUNTRY") or "United States"
-PLATFORMS = (os.environ.get("PLATFORMS") or "storygraph").lower()   # add "goodreads" back if you want it later
-GR_EMAIL, GR_PASSWORD = os.environ.get("GR_EMAIL"), os.environ.get("GR_PASSWORD")
-SG_EMAIL, SG_PASSWORD = os.environ.get("SG_EMAIL"), os.environ.get("SG_PASSWORD")
-SG_USERNAME = os.environ.get("SG_USERNAME")   # optional; auto-detected if blank
-GOODREADS_CSV, STORYGRAPH_CSV = "goodreads_library_export.csv", "storygraph_export.csv"
-MAX_PAGES = 10
-TITLE_FUZZY = 0.92
-AUTHOR_FUZZY = 0.88
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC")
+NTFY_TOKEN = os.environ.get("NTFY_TOKEN")                    # optional
 NTFY_SERVER = (os.environ.get("NTFY_SERVER") or "https://ntfy.sh").rstrip("/")
-SUMMARY = (os.environ.get("NTFY_SUMMARY") or "1") != "0"   # weekly "I ran" heartbeat
-NTFY_TOPIC, NTFY_TOKEN = os.environ.get("NTFY_TOPIC"), os.environ.get("NTFY_TOKEN")
-PROFILE_DIR, STATE_FILE, LOG_FILE = "browser_profile", "state.json", "giveaway_bot.log"
+SEND_SUMMARY = (os.environ.get("NTFY_SUMMARY") or "1") != "0"   # weekly "I ran" message
+SELECTORS_URL = os.environ.get("SELECTORS_URL")              # optional
 
+TITLE_MATCH_STRICTNESS = 0.92    # 1.0 = titles must match exactly; lower = more forgiving
+AUTHOR_MATCH_STRICTNESS = 0.88   # same idea for author names
+MAX_GIVEAWAY_PAGES = 10          # how many pages of the giveaway list to read
+
+# Files the bot reads and writes (all in the same folder as this script)
+BROWSER_PROFILE_DIR = "browser_profile"     # keeps you logged in between runs
+STATE_FILE = "state.json"
+LOG_FILE = "giveaway_bot.log"
+EXPORT_CSV = "storygraph_export.csv"        # optional backup copy of your to-read list
+SELECTORS_FILE = "selectors.json"
+SELECTORS_CACHE = "selectors_cache.json"
+UPDATE_NOTICE_FILE = "update_notified.txt"
+
+# Write messages both to the screen and to the log file
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
                     handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()])
 log = logging.info
 
-# ---------------- SELECTORS (updatable without touching the code) ----------------
+# =====================================================================
+# PAGE ELEMENT FINDERS ("selectors")
+# These tell the bot how to find things on StoryGraph's pages (buttons, titles, and so on).
+# If StoryGraph changes its layout and something stops working, fix the matching line here
+# or in selectors.json. You don't need to touch the rest of the code.
+# =====================================================================
 DEFAULT_SEL = {
  "sg_profile_link": "a[href^='/profile/'], a[href*='thestorygraph.com/profile/']",
  "sg_tbr_pane": "div.book-title-author-and-series",
@@ -79,541 +81,573 @@ DEFAULT_SEL = {
  "sg_giveaway_link": "a[href*='/giveaways/']",
  "sg_title": "h2 a[href*='/books/'], h1 a[href*='/books/']",
  "sg_enter": "a:has-text('Enter giveaway'), button:has-text('Enter giveaway')",
- "sg_confirm": "button:has-text('Confirm'), button:has-text('Enter'), input[type=submit][value*='nter']",
+ "sg_confirm_and_enter": "button:has-text('Confirm and Enter'), a:has-text('Confirm and Enter'), [role=button]:has-text('Confirm and Enter'), input[value*='Confirm and Enter']",
  "sg_email_field": "#user_email",
  "sg_password_field": "#user_password",
  "sg_login_submit": "input[type=submit], button[type=submit]",
- "sg_cookie_accept": "button:has-text('Accept and close'), button:has-text('Accept'), #onetrust-accept-btn-handler",
- "gr_signed_in": "a[href*='sign_out']",
- "gr_email_signin": "text=Sign in with email",
- "gr_amazon_email": "#ap_email",
- "gr_amazon_password": "#ap_password",
- "gr_amazon_submit": "#signInSubmit",
- "gr_tbr_row": "tr.bookalike",
- "gr_tbr_title": "td.field.title a",
- "gr_tbr_author": "td.field.author a",
- "gr_giveaway_link": "a[href*='/giveaway/show/']",
- "gr_title": "h1",
- "gr_author": "a[href*='/author/show/']",
- "gr_enter": "a:has-text('Enter Giveaway'), button:has-text('Enter Giveaway'), input[value*='Enter Giveaway']",
- "gr_terms": "input[type=checkbox][name*='agree'], input[type=checkbox][id*='agree'], input[type=checkbox][id*='terms']",
- "gr_submit": "input[type=submit][value*='Enter'], button:has-text('Enter to win'), button:has-text('Enter Giveaway')"
+ "sg_cookie_accept": "button:has-text('Accept and close'), button:has-text('Accept'), #onetrust-accept-btn-handler"
 }
-SEL = dict(DEFAULT_SEL)
-SELECTORS_URL = os.environ.get("SELECTORS_URL")   # raw URL of selectors.json in your repo
-SELECTORS_FILE, SELECTORS_CACHE, NOTIFIED_FILE = "selectors.json", "selectors_cache.json", "update_notified.txt"
+SEL = dict(DEFAULT_SEL)   # the finders actually in use (can be updated from selectors.json)
+
+# Counts and problems collected during a run, used for the notification at the end
 STATS = {"problems": [], "entered": 0, "inspected": 0, "unreadable": 0}
 
-def vtuple(v):
+def problem(msg):
+    """Record something that went wrong, so it can be included in the alert at the end."""
+    log(f"PROBLEM: {msg}")
+    STATS["problems"].append(msg)
+
+def version_tuple(v):
+    """'1.2.0' -> (1, 2, 0), so version numbers can be compared."""
     try: return tuple(int(x) for x in str(v).split("."))
     except Exception: return (0,)
 
 def load_selectors():
-    """defaults <- local selectors.json <- remote selectors.json (cached). DATA ONLY: strings are
-    used as Playwright selectors, never executed as code."""
+    """Set up the page element finders.
+    Order: built-in list -> selectors.json in this folder -> selectors.json online (if SELECTORS_URL is set).
+    Later ones win. The file is only ever read as plain text, never run as code."""
     SEL.clear(); SEL.update(DEFAULT_SEL)
-    def merge(d):
-        for k, v in (d.get("selectors") or {}).items():
-            if k in DEFAULT_SEL and isinstance(v, str) and 0 < len(v) < 500: SEL[k] = v
-    try: merge(json.load(open(SELECTORS_FILE)))
+
+    def apply(data):
+        for key, value in (data.get("selectors") or {}).items():
+            if key in DEFAULT_SEL and isinstance(value, str) and 0 < len(value) < 500:
+                SEL[key] = value
+
+    try: apply(json.load(open(SELECTORS_FILE)))
     except Exception: pass
     if not SELECTORS_URL: return
+
     data = None
     try:
         raw = urllib.request.urlopen(SELECTORS_URL, timeout=15).read()
-        data = json.loads(raw); open(SELECTORS_CACHE, "wb").write(raw)
-        log("selectors: fetched latest from SELECTORS_URL")
+        data = json.loads(raw)
+        open(SELECTORS_CACHE, "wb").write(raw)          # keep a copy in case the website is down next time
+        log("selectors: downloaded the latest version")
     except Exception as e:
-        log(f"selectors: remote fetch failed ({e}); trying cached copy")
+        log(f"selectors: couldn't download ({e}); using the saved copy instead")
         try: data = json.load(open(SELECTORS_CACHE))
         except Exception: pass
-    if data:
-        merge(data)
-        latest = data.get("latest_version")
-        if latest and vtuple(latest) > vtuple(VERSION) and (
-                not Path(NOTIFIED_FILE).exists() or Path(NOTIFIED_FILE).read_text().strip() != str(latest)):
-            push("Giveaway bot update available",
-                 f"Version {latest} is out (you have {VERSION}). {data.get('update_note', '')}\n{data.get('update_url', '')}",
-                 tags=["arrow_up"], click=data.get("update_url"))
-            Path(NOTIFIED_FILE).write_text(str(latest))
+    if not data: return
+    apply(data)
 
-def problem(msg):
-    log(f"PROBLEM: {msg}"); STATS["problems"].append(msg)
+    # If a newer version of the bot is announced, tell the user once.
+    latest = data.get("latest_version")
+    already_told = Path(UPDATE_NOTICE_FILE).read_text().strip() if Path(UPDATE_NOTICE_FILE).exists() else ""
+    if latest and version_tuple(latest) > version_tuple(VERSION) and already_told != str(latest):
+        push("Giveaway bot update available",
+             f"Version {latest} is out (you have {VERSION}). {data.get('update_note', '')}\n{data.get('update_url', '')}",
+             tags=["arrow_up"], click=data.get("update_url"))
+        Path(UPDATE_NOTICE_FILE).write_text(str(latest))
 
-# ---------------- MATCHING ----------------
-def norm_title(t):
-    t = re.sub(r"\(.*?\)", " ", t.lower()).split(":")[0]
+# =====================================================================
+# MATCHING BOOKS (title AND author must both match)
+# =====================================================================
+def clean_title(title):
+    """Make a title easy to compare: lowercase, drop (series info), drop the subtitle after a colon,
+    drop punctuation, and drop a leading The/A/An."""
+    t = re.sub(r"\(.*?\)", " ", title.lower()).split(":")[0]
     t = re.sub(r"[^\w\s]", "", t).strip()
     return re.sub(r"\s+", " ", re.sub(r"^(the|a|an)\s+", "", t))
 
-def norm_author(a):
-    a = a.strip()
-    if "," in a:                                   # Goodreads list view: "Knox, Jen"
-        last, first = a.split(",", 1); a = f"{first} {last}"
-    a = re.sub(r"\b(jr|sr|ii|iii)\b\.?", "", a.lower())
-    a = re.sub(r"[.]", "", a)                      # "J.K." -> "jk"
-    return re.sub(r"\s+", " ", re.sub(r"[^\w\s'-]", "", a)).strip()
+def clean_author(name):
+    """Make an author name easy to compare: lowercase, no Jr./Sr., no periods ('J.K.' becomes 'jk')."""
+    name = re.sub(r"\b(jr|sr|ii|iii)\b\.?", "", name.strip().lower())
+    name = name.replace(".", "")
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s'-]", "", name)).strip()
 
-def author_eq(a, b):
+def same_author(a, b):
+    """True if two cleaned author names are the same person (close spelling, or same last name + first initial)."""
     if not a or not b: return False
-    if a == b or difflib.SequenceMatcher(None, a, b).ratio() >= AUTHOR_FUZZY: return True
-    pa, pb = a.split(), b.split()
-    return pa[-1] == pb[-1] and pa[0][0] == pb[0][0]   # same surname + first initial
+    if a == b or difflib.SequenceMatcher(None, a, b).ratio() >= AUTHOR_MATCH_STRICTNESS: return True
+    first_a, first_b = a.split(), b.split()
+    return first_a[-1] == first_b[-1] and first_a[0][0] == first_b[0][0]
 
-class Tbr:
-    def __init__(self): self.items = []            # (title_norm, [author_norm,...])
+class ToReadShelf:
+    """Your to-read list. Each book is stored as (cleaned title, [cleaned author names])."""
+    def __init__(self):
+        self.books = []
+
     def add(self, title, authors):
         if title:
-            self.items.append((norm_title(title), [norm_author(a) for a in authors if a.strip()]))
-    def near(self, title):
-        """Shelf entries whose title is similar to this one (for diagnosing why a match failed)."""
-        t = norm_title(title)
-        return [(tt, ta) for tt, ta in self.items
-                if tt == t or difflib.SequenceMatcher(None, tt, t).ratio() >= 0.8]
-    def matches(self, title, authors):
-        t = norm_title(title); auths = [norm_author(a) for a in authors]
-        for tt, tauths in self.items:
-            if tt == t or difflib.SequenceMatcher(None, tt, t).ratio() >= TITLE_FUZZY:
-                if any(author_eq(x, y) for x in auths for y in tauths):
-                    return True
+            self.books.append((clean_title(title), [clean_author(a) for a in authors if a.strip()]))
+
+    def has(self, title, authors):
+        """True if a book with a matching title AND author is on the shelf."""
+        wanted_title = clean_title(title)
+        wanted_authors = [clean_author(a) for a in authors]
+        for shelf_title, shelf_authors in self.books:
+            title_matches = (shelf_title == wanted_title or
+                             difflib.SequenceMatcher(None, shelf_title, wanted_title).ratio() >= TITLE_MATCH_STRICTNESS)
+            if title_matches and any(same_author(x, y) for x in wanted_authors for y in shelf_authors):
+                return True
         return False
 
-def load_csvs(tbr):
-    for path, status_col, auth_cols in [(GOODREADS_CSV, "Exclusive Shelf", ["Author", "Additional Authors"]),
-                                        (STORYGRAPH_CSV, "Read Status", ["Authors"])]:
-        if not Path(path).exists(): continue
-        with open(path, newline="", encoding="utf-8-sig") as f:
-            for row in csv.DictReader(f):
-                if (row.get(status_col) or "").strip().lower() != "to-read": continue
-                authors = [a for c in auth_cols for a in (row.get(c) or "").split(",")]
-                tbr.add(row.get("Title", ""), authors)
+    def similar_titles(self, title):
+        """Shelf books with a similar title. Used only to explain in the log why a match failed."""
+        wanted = clean_title(title)
+        return [(t, a) for t, a in self.books
+                if t == wanted or difflib.SequenceMatcher(None, t, wanted).ratio() >= 0.8]
 
-# ---------------- STATE ----------------
-def load_state():
+def load_export_csv(shelf):
+    """Optional backup: also add the to-read books from your StoryGraph export file, if it's in this folder."""
+    if not Path(EXPORT_CSV).exists(): return
+    with open(EXPORT_CSV, newline="", encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            if (row.get("Read Status") or "").strip().lower() == "to-read":
+                shelf.add(row.get("Title", ""), (row.get("Authors") or "").split(","))
+
+# =====================================================================
+# MEMORY OF WHAT'S ALREADY ENTERED
+# =====================================================================
+def load_entered():
     try: return set(json.load(open(STATE_FILE))["entered"])
     except Exception: return set()
-def save_state(entered): json.dump({"entered": sorted(entered)}, open(STATE_FILE, "w"), indent=1)
 
+def save_entered(entered):
+    json.dump({"entered": sorted(entered)}, open(STATE_FILE, "w"), indent=1)
+
+# =====================================================================
+# PHONE NOTIFICATIONS (ntfy)
+# =====================================================================
 def push(title, message, tags=None, click=None, priority=None):
-    """Send an ntfy notification. Never raises: a failure must not stop the run."""
+    """Send a notification through ntfy. If sending fails, it's logged but never stops the run."""
     if not NTFY_TOPIC:
-        log("  (notifications not configured; set NTFY_TOPIC)"); return
+        log("  (no notification sent: NTFY_TOPIC isn't set)"); return
     payload = {"topic": NTFY_TOPIC, "title": title[:100], "message": message, "tags": tags or []}
-    if click: payload["click"] = click
+    if click: payload["click"] = click          # tapping the notification opens this link
     if priority: payload["priority"] = priority
     headers = {"Content-Type": "application/json"}
     if NTFY_TOKEN: headers["Authorization"] = f"Bearer {NTFY_TOKEN}"
-    try:   # JSON publishing supports non-ASCII book titles, unlike header-based publishing
-        urllib.request.urlopen(urllib.request.Request(NTFY_SERVER, json.dumps(payload).encode("utf-8"), headers),
-                               timeout=15).read()
+    try:
+        request = urllib.request.Request(NTFY_SERVER, json.dumps(payload).encode("utf-8"), headers)
+        urllib.request.urlopen(request, timeout=15).read()
         log("  notification sent")
     except Exception as e:
         log(f"  notification failed: {e}")
 
-def notify(site, title, authors, fmt, url, uncertain=False):
+def notify_entered(title, authors, url, uncertain=False):
+    """Tell you about an entry. 'uncertain' means we clicked through but couldn't confirm it worked."""
     by = ", ".join(dict.fromkeys(a.strip() for a in authors if a.strip()))
-    body = ("Clicked enter but couldn't confirm it went through. Please check.\n" if uncertain
-            else "You've been entered in a giveaway!\n") + f"Book: {title}\nAuthor: {by}\nFormat: {fmt}\nSite: {site}"
-    push(("Check manually: " if uncertain else "Entered: ") + title[:80], body, click=url,
-         tags=["warning" if uncertain else "books"])
+    if uncertain:
+        intro, heading, tag = "Clicked through the entry steps but couldn't confirm it worked. Please check.\n", "Check manually: ", "warning"
+    else:
+        intro, heading, tag = "You've been entered in a giveaway!\n", "Entered: ", "books"
+    push(heading + title[:80], intro + f"Book: {title}\nAuthor: {by}\nFormat: Print\nSite: StoryGraph",
+         click=url, tags=[tag])
 
-def pause(a=2.5, b=5.5): time.sleep(random.uniform(a, b))
+# =====================================================================
+# SMALL BROWSER HELPERS
+# =====================================================================
+def pause(low=2.5, high=5.5):
+    """Wait a random few seconds, so the bot moves at a human pace."""
+    time.sleep(random.uniform(low, high))
 
 def goto(page, url):
-    """page.goto(), but tolerant of a fast JS redirect aborting the navigation
-    (e.g. Goodreads sign-in bouncing straight to Amazon) before Playwright's
-    default 'load' wait finishes. Always waits for at least the DOM to be ready,
-    then gives any secondary redirect a moment to settle before returning, so
-    callers don't try to read the page mid-navigation."""
+    """Open a page and wait until it's ready. Also copes with pages that redirect right away."""
     try:
         page.goto(url, wait_until="domcontentloaded")
     except Exception as e:
         if "ERR_ABORTED" in str(e):
-            log(f"  (goto redirected away from {url}, continuing at {page.url})")
+            log(f"  (the page redirected; continuing at {page.url})")
         else:
             raise
-    try:
-        page.wait_for_load_state("domcontentloaded", timeout=5000)
-    except Exception:
-        pass   # no further navigation happened, or it also got aborted by yet another redirect - fine either way
-    time.sleep(1)
+    try: page.wait_for_load_state("domcontentloaded", timeout=5000)
+    except Exception: pass
+    time.sleep(1)   # let any extra redirect finish
 
 def safe_query(page, selector):
-    """page.query_selector(), retried once if the page navigates out from under it."""
-    for attempt in range(2):
+    """Find one element. If the page changes mid-search, wait a moment and try once more."""
+    for _ in range(2):
         try:
             return page.query_selector(selector)
         except Exception as e:
             if "context was destroyed" in str(e).lower() or "execution context" in str(e).lower():
-                log("  (page navigated mid-query, retrying)"); time.sleep(1); continue
+                log("  (page changed while searching; trying again)"); time.sleep(1); continue
             raise
     return None
 
-def blocked(page):
-    txt = page.content().lower()
-    return any(k in txt for k in ["captcha", "otp", "verification code", "solve this puzzle"])
+def visible_elements(page, selector):
+    """All elements matching the selector that are actually showing on screen."""
+    found = []
+    for element in page.query_selector_all(selector):
+        try:
+            if element.is_visible(): found.append(element)
+        except Exception:
+            pass
+    return found
 
-# ---------------- STORYGRAPH ----------------
+def click(element):
+    """Click something. If another element is blocking it, click it directly instead of getting stuck."""
+    try: element.scroll_into_view_if_needed(timeout=5000)
+    except Exception: pass
+    try:
+        element.click(timeout=8000)
+    except PWTimeout:
+        log("  normal click was blocked; clicking it directly instead")
+        element.evaluate("e => e.click()")
+
 def snapshot(page, name):
-    """Save a screenshot + HTML for debugging when something can't be found. Never raises."""
+    """Save a screenshot and the page's HTML into the debug folder, to help figure out what went wrong."""
     try:
         Path("debug").mkdir(exist_ok=True)
         page.screenshot(path=f"debug/{name}.png", full_page=True)
         Path(f"debug/{name}.html").write_text(page.content(), encoding="utf-8")
         log(f"  saved debug/{name}.png and debug/{name}.html")
     except Exception as e:
-        log(f"  snapshot failed: {e}")
+        log(f"  couldn't save a screenshot: {e}")
+
+_saved_once = set()
+def snapshot_once(page, name):
+    """Same as snapshot(), but only the first time per run (so the debug folder doesn't fill up)."""
+    if name not in _saved_once:
+        _saved_once.add(name); snapshot(page, name)
 
 def dismiss_cookies(page):
-    """Clear StoryGraph's cookie banner if it's showing; it can sit on top of buttons and block clicks."""
-    try:
-        b = safe_query(page, SEL["sg_cookie_accept"])
-        if b and b.is_visible(): b.click(timeout=3000); time.sleep(0.5)
-    except Exception:
-        pass
+    """Close StoryGraph's cookie banner if it's showing. It can cover buttons and block clicks."""
+    for find in (lambda: safe_query(page, SEL["sg_cookie_accept"]),
+                 lambda: page.query_selector("text=Accept and close")):
+        try:
+            button = find()
+            if button and button.is_visible():
+                button.click(timeout=3000); time.sleep(0.5); return
+        except Exception:
+            pass
 
-def sg_login(page, headed=False):
+# =====================================================================
+# LOGGING IN
+# =====================================================================
+def login(page, headed=False):
+    """Make sure we're signed in to StoryGraph. Returns True if we are."""
     goto(page, "https://app.thestorygraph.com/users/sign_in")
-    if "sign_in" not in page.url: return True            # already signed in
-    if not (SG_EMAIL and SG_PASSWORD): log("StoryGraph: not logged in and no SG_EMAIL/SG_PASSWORD"); return False
-    try:
-        cookie_btn = safe_query(page, SEL["sg_cookie_accept"])
-        if cookie_btn and cookie_btn.is_visible(): cookie_btn.click(); pause(0.5, 1)
-    except Exception as e:
-        log(f"  (cookie banner dismiss failed, continuing anyway: {e})")
+    if "sign_in" not in page.url:
+        return True                                  # the saved login from a previous run still works
+    if not (SG_EMAIL and SG_PASSWORD):
+        log("StoryGraph: not signed in, and SG_EMAIL / SG_PASSWORD aren't set"); return False
+    dismiss_cookies(page)
 
-    # A human watching (--headed) can take as long as they need to solve a checkbox/CAPTCHA;
-    # an unattended run has nobody to solve anything, so it should fail fast instead of hanging for minutes.
-    field_timeout_ms = 600_000 if headed else 30_000     # 10 min headed, 30s unattended
-    second_step_checks = 200 if headed else 10           # 10 min headed (3s each), 30s unattended
-
+    # If you're watching (--headed), wait up to 10 minutes so you can click any "I'm not a robot" box.
+    # If nobody is watching, give up quickly, because nobody could click it anyway.
+    wait_for_form_ms = 600_000 if headed else 30_000
+    wait_after_submit_checks = 200 if headed else 10   # each check is 3 seconds apart
     try:
         if headed:
-            log("  waiting up to 10 minutes for you to sign in / solve any verification - take your time...")
-        page.wait_for_selector(SEL["sg_email_field"], state="visible", timeout=field_timeout_ms)
+            log("  waiting up to 10 minutes for the sign-in form (click any verification box if you see one)...")
+        page.wait_for_selector(SEL["sg_email_field"], state="visible", timeout=wait_for_form_ms)
     except PWTimeout:
-        snapshot(page, "sg_login_email_not_found")
-        log(f"StoryGraph: email field never became visible; see debug/sg_login_email_not_found.*")
+        snapshot(page, "login_form_not_found")
+        log("StoryGraph: the sign-in form never appeared. See debug/login_form_not_found.png")
         return False
-    page.fill(SEL["sg_email_field"], SG_EMAIL); page.fill(SEL["sg_password_field"], SG_PASSWORD)
+
+    page.fill(SEL["sg_email_field"], SG_EMAIL)
+    page.fill(SEL["sg_password_field"], SG_PASSWORD)
     page.click(SEL["sg_login_submit"])
-    try:
-        page.wait_for_load_state("domcontentloaded")
-    except PWTimeout:
-        pass
-    # give a second verification step (if StoryGraph shows one after credentials) time to be solved by hand
+    try: page.wait_for_load_state("domcontentloaded")
+    except PWTimeout: pass
+
+    # StoryGraph may show a second verification step after you submit. Give it time to be completed.
     if headed:
-        log("  if another verification step appears now, you have up to 10 more minutes to solve it...")
-    for _ in range(second_step_checks):
+        log("  if another verification step appears, you have up to 10 more minutes...")
+    for _ in range(wait_after_submit_checks):
         if "sign_in" not in page.url: break
         time.sleep(3)
-    ok = "sign_in" not in page.url
-    if not ok:
-        snapshot(page, "sg_login_failed")
-        log("StoryGraph login failed (bad creds or captcha). See debug/sg_login_failed.*")
-    return ok
+    signed_in = "sign_in" not in page.url
+    if not signed_in:
+        snapshot(page, "login_failed")
+        log("StoryGraph login failed (wrong password, or a verification step). See debug/login_failed.png")
+    return signed_in
 
-def sg_scrape_tbr(page, tbr):
-    user = SG_USERNAME
-    if not user:
+# =====================================================================
+# READING YOUR TO-READ SHELF
+# =====================================================================
+def read_to_read_shelf(page, shelf):
+    """Read every book on your StoryGraph to-read shelf into 'shelf'. Returns how many books were found."""
+    username = SG_USERNAME
+    if not username:
         goto(page, "https://app.thestorygraph.com/")
-        a = page.query_selector(SEL["sg_profile_link"])
-        user = a.get_attribute("href").rstrip("/").split("/")[-1] if a else None
-    if not user: log("StoryGraph: couldn't detect username (set SG_USERNAME)"); return
-    seen, n0 = set(), len(tbr.items)
-    for n in range(1, 60):
-        goto(page, f"https://app.thestorygraph.com/to-read/{user}?page={n}")
-        panes = page.query_selector_all(SEL["sg_tbr_pane"])
-        new = 0
-        for p in panes:
-            t = p.query_selector(SEL["sg_tbr_title"])
-            if not t: continue
-            title = t.inner_text().strip()
-            authors = [x.inner_text() for x in p.query_selector_all(SEL["sg_author"])]
+        link = page.query_selector(SEL["sg_profile_link"])
+        username = link.get_attribute("href").rstrip("/").split("/")[-1] if link else None
+    if not username:
+        log("StoryGraph: couldn't find your username (you can set SG_USERNAME)"); return 0
+
+    seen = set()
+    count_before = len(shelf.books)
+    for page_number in range(1, 60):
+        goto(page, f"https://app.thestorygraph.com/to-read/{username}?page={page_number}")
+        new_books = 0
+        for pane in page.query_selector_all(SEL["sg_tbr_pane"]):
+            title_link = pane.query_selector(SEL["sg_tbr_title"])
+            if not title_link: continue
+            title = title_link.inner_text().strip()
+            authors = [a.inner_text() for a in pane.query_selector_all(SEL["sg_author"])]
             if (title, tuple(authors)) in seen: continue
-            seen.add((title, tuple(authors))); tbr.add(title, authors); new += 1
-        if not new: break
+            seen.add((title, tuple(authors)))
+            shelf.add(title, authors)
+            new_books += 1
+        if not new_books: break            # no new books on this page, so we've reached the end
         pause(1.5, 3)
-    log(f"StoryGraph to-read scraped: {len(tbr.items) - n0} books")
-    return len(tbr.items) - n0
+    found = len(shelf.books) - count_before
+    log(f"StoryGraph to-read scraped: {found} books")
+    return found
 
-def sg_collect(page):
-    urls = set(); pat = re.compile(r"/giveaways/[0-9a-f]{8}-[0-9a-f-]{27}")
-    def grab():
+# =====================================================================
+# FINDING GIVEAWAYS
+# =====================================================================
+def find_giveaways(page):
+    """Collect the link to every open giveaway (from the home page and the giveaways list)."""
+    links = set()
+    link_pattern = re.compile(r"/giveaways/[0-9a-f]{8}-[0-9a-f-]{27}")
+
+    def collect_links():
         for a in page.query_selector_all(SEL["sg_giveaway_link"]):
-            m = pat.search(a.get_attribute("href") or "")
-            if m: urls.add("https://app.thestorygraph.com" + m.group(0))
-    goto(page, "https://app.thestorygraph.com/")
-    for _ in range(4): page.mouse.wheel(0, 4000); time.sleep(1)     # home page giveaways sit at the bottom
-    grab()
-    for n in range(1, MAX_PAGES + 1):
-        before = len(urls)
-        goto(page, f"https://app.thestorygraph.com/giveaways?page={n}")
-        for _ in range(3): page.mouse.wheel(0, 4000); time.sleep(0.8)
-        grab()
-        if len(urls) == before: break
-        pause(1.5, 3)
-    log(f"StoryGraph: {len(urls)} giveaways found")
-    return sorted(urls)
+            match = link_pattern.search(a.get_attribute("href") or "")
+            if match: links.add("https://app.thestorygraph.com" + match.group(0))
 
-PRIZE_BLOCK_JS = """el => { let n = el; while (n.parentElement) { n = n.parentElement;
+    goto(page, "https://app.thestorygraph.com/")
+    for _ in range(4):                                  # scroll down; giveaways are at the bottom of the home page
+        page.mouse.wheel(0, 4000); time.sleep(1)
+    collect_links()
+
+    for page_number in range(1, MAX_GIVEAWAY_PAGES + 1):
+        count_before = len(links)
+        goto(page, f"https://app.thestorygraph.com/giveaways?page={page_number}")
+        for _ in range(3):
+            page.mouse.wheel(0, 4000); time.sleep(0.8)
+        collect_links()
+        if len(links) == count_before: break            # nothing new, so that was the last page
+        pause(1.5, 3)
+    log(f"StoryGraph: {len(links)} giveaways found")
+    return sorted(links)
+
+# =====================================================================
+# READING A GIVEAWAY PAGE
+# =====================================================================
+# A giveaway can have several prizes (for example one print and one digital). Each prize is a block
+# of text that includes "Format: Print" or "Format: Digital". This snippet starts at a button and
+# moves outward until it finds the block of text for the prize that button belongs to.
+PRIZE_TEXT_JS = """el => { let n = el; while (n.parentElement) { n = n.parentElement;
     if ((n.textContent || '').includes('Format:')) return n.textContent; } return ''; }"""
 
-def sg_country_ok(block):
-    m = re.search(r"Eligible countries(.*)", block, re.S | re.I)
-    seg = m.group(1) if m else ""
-    return bool(re.search(rf"(?<![A-Za-z-]){re.escape(MY_COUNTRY)}(?![A-Za-z-])", seg))
+def prize_format(prize_text):
+    """Return the prize's format as one lowercase word, for example 'print' or 'digital'."""
+    match = re.search(r"Format:\s*(.*)", prize_text, re.S)
+    rest = (match.group(1) if match else "").strip().lower()
+    for name in ("print", "digital", "audio", "ebook", "e-book"):
+        if rest.startswith(name): return name
+    return (re.match(r"[a-z]+", rest) or [""])[0]
 
-_snapshotted_unreadable = [False]
-_snapshotted_timeout = [False]
+def country_is_eligible(prize_text):
+    """True if your country is listed under the prize's eligible countries."""
+    match = re.search(r"Eligible countries(.*)", prize_text, re.S | re.I)
+    countries_text = match.group(1) if match else ""
+    # The checks on either side stop 'Niger' from matching 'Nigeria', or 'Guinea' from matching 'Guinea-Bissau'.
+    return bool(re.search(rf"(?<![A-Za-z-]){re.escape(MY_COUNTRY)}(?![a-z-])", countries_text))
 
-def sg_authors_from_heading(t, title):
-    """On a giveaway page the heading reads '<Title> by <Author A>, <Author B>' with the author as
-    plain text (not a link). Pull the author(s) from the heading text after the title."""
+def authors_from_heading(title_link, title):
+    """On a giveaway page the heading reads 'Book Title by Author One, Author Two'.
+    The author isn't a link, so read it from the heading text that comes after the title."""
     try:
-        full = t.evaluate("e => ((e.closest('h1,h2,h3') || e.parentElement).innerText || '')")
+        heading = title_link.evaluate("e => ((e.closest('h1,h2,h3') || e.parentElement).innerText || '')")
     except Exception:
         return []
-    full = re.sub(r"\s+", " ", full).strip()
-    rest = full.replace(title, "", 1).strip() if title in full else full
+    heading = re.sub(r"\s+", " ", heading).strip()
+    rest = heading.replace(title, "", 1).strip() if title in heading else heading
     rest = re.sub(r"^by\s+", "", rest, flags=re.I).strip()
-    if not rest or rest == full: return []
-    return [a.strip() for a in re.split(r",|&|\band\b", rest) if a.strip()]
+    if not rest or rest == heading: return []
+    return [name.strip() for name in re.split(r",|&|\band\b", rest) if name.strip()]
 
-def sg_process(page, url, tbr, live, entered):
+def print_enter_buttons(page):
+    """The 'Enter giveaway' buttons on screen that belong to a PRINT prize."""
+    buttons = []
+    for button in visible_elements(page, SEL["sg_enter"]):
+        try: prize_text = button.evaluate(PRIZE_TEXT_JS)
+        except Exception: continue
+        if prize_text.count("Format:") == 1 and prize_format(prize_text) == "print":
+            buttons.append(button)
+    return buttons
+
+# =====================================================================
+# ENTERING A GIVEAWAY
+# =====================================================================
+def click_through_entry(page, first_button):
+    """StoryGraph's entry steps are:
+         1. click 'Enter giveaway'                      (opens a new screen)
+         2. click 'Enter giveaway' again under Prizes   (opens a section with a confirm button)
+         3. click 'Confirm and Enter'
+    This looks at what's on screen after every click and does the next step, so it still works
+    if the steps are slightly different from what's described above."""
+    dismiss_cookies(page)
+    click(first_button)
+    time.sleep(3)
+    for _ in range(4):
+        dismiss_cookies(page)
+        confirm_buttons = visible_elements(page, SEL["sg_confirm_and_enter"])
+        if confirm_buttons:                              # step 3
+            click(confirm_buttons[0]); time.sleep(3)
+            return
+        enter_buttons = print_enter_buttons(page)        # step 2
+        if not enter_buttons:
+            raise RuntimeError("couldn't find the Enter / Confirm and Enter button for the print prize")
+        click(enter_buttons[0])
+        try: page.wait_for_selector(SEL["sg_confirm_and_enter"], state="visible", timeout=8000)
+        except PWTimeout: pass
+    raise RuntimeError("the 'Confirm and Enter' button never appeared")
+
+def check_giveaway(page, url, shelf, live, entered):
+    """Look at one giveaway. Enter it if it passes every check (or just report it, on a dry run).
+    Returns a one-line result that gets written to the log."""
     goto(page, url)
-    t = page.query_selector(SEL["sg_title"])
-    title = re.sub(r"\s+", " ", t.inner_text()).strip() if t else ""
-    authors = sg_authors_from_heading(t, title) if t else []
-    authors += [a.inner_text() for a in page.query_selector_all(SEL["sg_author"])]   # in case author links exist too
-    if not title or not authors:
-        if not _snapshotted_unreadable[0]:
-            _snapshotted_unreadable[0] = True; snapshot(page, "sg_giveaway_unreadable")
-        return f"skip (couldn't read title/author): {url}"
-    if not tbr.matches(title, authors):
-        nr = tbr.near(title)
-        extra = f"  [similar title on your shelf but author differs: {nr}]" if nr else ""
-        return f"skip (not on TBR): {title} / {authors}{extra}"
 
-    btns = page.query_selector_all(SEL["sg_enter"])
-    if not btns: return f"skip (no enter button: closed/entered/ineligible): {title}"
-    for i, btn in enumerate(btns):
-        block = btn.evaluate(PRIZE_BLOCK_JS)
-        if block.count("Format:") != 1: log(f"  ambiguous prize layout on {url}"); continue
-        fmt = (re.search(r"Format:\s*([A-Za-z]+)", block) or [None, ""])[1].lower()
-        key = f"sg:{url}:{fmt}"
-        if fmt != "print":      log(f"  skip prize (format={fmt}): {title}"); continue
-        if key in entered:      return f"skip (already entered): {title}"
-        if not sg_country_ok(block): log(f"  skip prize (not eligible in {MY_COUNTRY}): {title}"); continue
-        if not live: return f"WOULD ENTER (StoryGraph, print): {title} {url}"
-        step = "clearing cookie banner"
+    # 1. Read the book's title and author
+    title_link = page.query_selector(SEL["sg_title"])
+    title = re.sub(r"\s+", " ", title_link.inner_text()).strip() if title_link else ""
+    authors = authors_from_heading(title_link, title) if title_link else []
+    authors += [a.inner_text() for a in page.query_selector_all(SEL["sg_author"])]   # in case authors are links
+    if not title or not authors:
+        snapshot_once(page, "giveaway_page_unreadable")
+        return f"skip (couldn't read title/author): {url}"
+
+    # 2. Is it on your to-read shelf?
+    if not shelf.has(title, authors):
+        similar = shelf.similar_titles(title)
+        hint = f"  [similar title on your shelf but the author differs: {similar}]" if similar else ""
+        return f"skip (not on TBR): {title} / {authors}{hint}"
+
+    # 3. Is there an Enter button? (There isn't if it's closed or you've already entered.)
+    enter_buttons = page.query_selector_all(SEL["sg_enter"])
+    if not enter_buttons:
+        return f"skip (no enter button: closed/entered/ineligible): {title}"
+
+    # 4. Find the print prize that's open to your country
+    for button in enter_buttons:
+        prize_text = button.evaluate(PRIZE_TEXT_JS)
+        if prize_text.count("Format:") != 1:
+            log(f"  couldn't tell which prize a button belongs to on {url}"); continue
+        fmt = prize_format(prize_text)
+        memory_key = f"sg:{url}:{fmt}"
+        if fmt != "print":
+            log(f"  skip prize (format={fmt}): {title}"); continue
+        if memory_key in entered:
+            return f"skip (already entered): {title}"
+        if not country_is_eligible(prize_text):
+            log(f"  skip prize (not open to {MY_COUNTRY}): {title}"); continue
+        if not live:
+            return f"WOULD ENTER (StoryGraph, print): {title} {url}"
+
+        # 5. Enter it for real
         try:
-            dismiss_cookies(page)
-            step = "clicking Enter"
-            btn.scroll_into_view_if_needed(timeout=8000)
-            try:
-                btn.click(timeout=8000)
-            except PWTimeout:
-                log("  normal click was blocked or timed out; trying a direct click instead")
-                btn.evaluate("e => e.click()")
-            step = "waiting after click"
-            try: page.wait_for_load_state("domcontentloaded", timeout=8000)
-            except PWTimeout: pass
-            time.sleep(2)
-            step = "confirming"
-            confirm = safe_query(page, SEL["sg_confirm"])
-            if confirm and confirm.is_visible():
-                same = confirm.evaluate("(e, b) => e === b", btn)          # never re-click the Enter button itself
-                txt = (confirm.inner_text() or "").lower()
-                if not same and "enter giveaway" not in txt:
-                    confirm.click(timeout=8000); time.sleep(2)
+            click_through_entry(page, button)
         except Exception as e:
-            snapshot(page, "sg_enter_failed")
-            return f"FAILED while {step} ({type(e).__name__}): {title} {url} -> see debug/sg_enter_failed.*"
-        body = page.inner_text("body").lower()
-        if "entered" in body or "good luck" in body or "you're in" in body:
-            entered.add(key); save_state(entered)
-            notify("StoryGraph", title, authors, "Print", url)
+            snapshot(page, "enter_failed")
+            return f"FAILED ({type(e).__name__}: {str(e)[:120]}): {title} {url} -> see debug/enter_failed.png"
+
+        # 6. Double-check: once you've entered, StoryGraph stops showing an Enter button for that prize
+        goto(page, url); dismiss_cookies(page)
+        if not print_enter_buttons(page):
+            entered.add(memory_key); save_entered(entered)
+            notify_entered(title, authors, url)
             return f"ENTERED (StoryGraph): {title} {url}"
-        snapshot(page, "sg_enter_uncertain")
-        notify("StoryGraph", title, authors, "Print", url, uncertain=True)
-        return f"UNCERTAIN (clicked enter, no confirmation text seen; check manually; see debug/sg_enter_uncertain.*): {title} {url}"
+        snapshot(page, "enter_uncertain")
+        notify_entered(title, authors, url, uncertain=True)
+        return f"UNCERTAIN (clicked through, but an Enter button is still showing; please check): {title} {url}"
+
     return f"skip (no eligible print prize): {title}"
 
-# ---------------- GOODREADS ----------------
-def gr_logged_in(page):
-    goto(page, "https://www.goodreads.com/")
-    return safe_query(page, SEL["gr_signed_in"]) is not None
-
-def gr_login(page):
-    if gr_logged_in(page): return True
-    if not (GR_EMAIL and GR_PASSWORD): log("Goodreads: not logged in and no GR_EMAIL/GR_PASSWORD"); return False
-    goto(page, "https://www.goodreads.com/user/sign_in")
-    e = safe_query(page, SEL["gr_email_signin"])
-    if e: e.click(); page.wait_for_load_state("domcontentloaded")
-    try:
-        page.fill(SEL["gr_amazon_email"], GR_EMAIL); page.fill(SEL["gr_amazon_password"], GR_PASSWORD)
-        page.click(SEL["gr_amazon_submit"]); page.wait_for_load_state("domcontentloaded"); pause()
-    except Exception as ex:
-        snapshot(page, "gr_login_amazon_form_not_found")
-        log(f"Goodreads login form not found: {ex}. See debug/gr_login_amazon_form_not_found.*"); return False
-    if blocked(page) or not gr_logged_in(page):
-        snapshot(page, "gr_login_blocked")
-        log("Goodreads login blocked (captcha/2FA?). See debug/gr_login_blocked.*"); return False
-    return True
-
-def gr_scrape_tbr(page, tbr):
-    n0 = len(tbr.items); seen = set()
-    for n in range(1, 60):
-        goto(page, f"https://www.goodreads.com/review/list?shelf=to-read&per_page=100&page={n}")
-        rows = page.query_selector_all(SEL["gr_tbr_row"])
-        new = 0
-        for r in rows:
-            t = r.query_selector(SEL["gr_tbr_title"])
-            if not t: continue
-            title = (t.get_attribute("title") or t.inner_text()).strip()
-            authors = [a.inner_text() for a in r.query_selector_all(SEL["gr_tbr_author"])]
-            if (title, tuple(authors)) in seen: continue
-            seen.add((title, tuple(authors))); tbr.add(title, authors); new += 1
-        if not new: break
-        pause(1.5, 3)
-    log(f"Goodreads to-read scraped: {len(tbr.items) - n0} books")
-    return len(tbr.items) - n0
-
-def gr_collect(page):
-    urls = set()
-    for n in range(1, MAX_PAGES + 1):
-        goto(page, f"https://www.goodreads.com/giveaway?sort=ending_soon&page={n}")
-        links = page.query_selector_all(SEL["gr_giveaway_link"])
-        if not links: break
-        for a in links:
-            h = a.get_attribute("href").split("?")[0]
-            urls.add(h if h.startswith("http") else "https://www.goodreads.com" + h)
-        pause(1.5, 3)
-    log(f"Goodreads: {len(urls)} giveaways found")
-    return sorted(urls)
-
-def gr_is_print(text):
-    t = text.lower()
-    digital = re.search(r"\b(e-?book|kindle|digital|audiobook|audible)\b", t)
-    physical = re.search(r"\b(print|hardcover|hardback|paperback)\b", t)
-    return bool(physical) and not (digital and not physical)
-
-def gr_country_ok(text):
-    m = re.search(r"available (?:for|in)[:\s]+([^\n]+)", text, re.I)
-    if not m: return True
-    listed = m.group(1).lower()
-    return "worldwide" in listed or "international" in listed or MY_COUNTRY.lower() in listed \
-        or (MY_COUNTRY == "United States" and re.search(r"\b(usa|u\.s\.)", listed) is not None)
-
-def gr_process(page, url, tbr, live, entered):
-    if f"gr:{url}" in entered: return f"skip (already entered): {url}"
-    goto(page, url)
-    h1 = page.query_selector(SEL["gr_title"]); title = h1.inner_text().strip() if h1 else ""
-    authors = [a.inner_text() for a in page.query_selector_all(SEL["gr_author"])][:3]
-    body = page.inner_text("body")
-    if not title or not authors:        return f"skip (couldn't read title/author): {url}"
-    if not tbr.matches(title, authors): return f"skip (not on TBR): {title} / {authors}"
-    if not gr_is_print(body):           return f"skip (not print): {title}"
-    if not gr_country_ok(body):         return f"skip (country): {title}"
-    btn = page.query_selector(SEL["gr_enter"])
-    if not btn:                         return f"skip (no enter button): {title}"
-    if not live:                        return f"WOULD ENTER (Goodreads): {title} {url}"
-    btn.click(); page.wait_for_load_state("domcontentloaded"); time.sleep(1.5)
-    for cb in page.query_selector_all(SEL["gr_terms"]):
-        if not cb.is_checked(): cb.check()
-    sub = page.query_selector(SEL["gr_submit"])
-    if not sub: return f"FAILED (no submit button; check selectors): {title}"
-    sub.click(); page.wait_for_load_state("domcontentloaded")
-    entered.add(f"gr:{url}"); save_state(entered)
-    fm = re.search(r"\b(hardcover|hardback|paperback)\b", body, re.I)
-    fmt = f"Print ({fm.group(1).lower()})" if fm else "Print"
-    notify("Goodreads", title, authors, fmt, url)
-    return f"ENTERED (Goodreads): {title} {url}"
-
-# ---------------- RUN ----------------
+# =====================================================================
+# ONE FULL RUN
+# =====================================================================
 def run_once(live, headed):
-    entered = load_state(); tbr = Tbr()
+    entered = load_entered()
+    shelf = ToReadShelf()
     STATS.update(problems=[], entered=0, inspected=0, unreadable=0)
     load_selectors()
-    want_sg, want_gr = "storygraph" in PLATFORMS, "goodreads" in PLATFORMS
+
     with sync_playwright() as pw:
-        ctx = pw.chromium.launch_persistent_context(PROFILE_DIR, headless=not headed,
-                                                    viewport={"width": 1280, "height": 900})
-        page = ctx.new_page(); page.set_default_timeout(20000)
+        # A real browser window (visible if --headed). Its saved login lives in the profile folder.
+        context = pw.chromium.launch_persistent_context(BROWSER_PROFILE_DIR, headless=not headed,
+                                                        viewport={"width": 1280, "height": 900})
+        page = context.new_page()
+        page.set_default_timeout(20000)
         try:
-            sg_ok = sg_login(page, headed=headed) if want_sg else False
-            gr_ok = gr_login(page) if want_gr else False
-            if want_sg and not sg_ok: problem("StoryGraph login failed (credentials/captcha?)")
-            if want_gr and not gr_ok: problem("Goodreads login failed (captcha/2FA/blocked?)")
+            if not login(page, headed=headed):
+                problem("StoryGraph login failed (wrong password, or a verification step)")
+            else:
+                # Read your shelf
+                try: books_found = read_to_read_shelf(page, shelf)
+                except Exception as e: log(f"couldn't read your to-read shelf: {e}"); books_found = 0
+                if books_found == 0:
+                    problem("Found 0 books on your to-read shelf. It may be empty, or StoryGraph's layout changed.")
+                load_export_csv(shelf)
+                log(f"Total to-read entries: {len(shelf.books)}")
 
-            counts = {}
-            for name, ok, fn in [("StoryGraph", sg_ok, sg_scrape_tbr), ("Goodreads", gr_ok, gr_scrape_tbr)]:
-                if not ok: continue
-                try: counts[name] = fn(page, tbr) or 0
-                except Exception as e: log(f"{name} TBR scrape error: {e}"); counts[name] = 0
-                if counts[name] == 0:
-                    problem(f"{name}: scraped 0 to-read books. Empty shelf, or the page layout changed.")
-            load_csvs(tbr)
-            log(f"Total to-read entries: {len(tbr.items)}")
+                # Find the giveaways
+                giveaway_links = find_giveaways(page)
+                if not giveaway_links:
+                    problem("Found 0 giveaways. StoryGraph's layout may have changed.")
+                if not shelf.books:
+                    problem("No to-read books loaded, so nothing was entered this run.")
+                    giveaway_links = []
 
-            jobs = []
-            for name, ok, collect, fn in [("StoryGraph", sg_ok, sg_collect, sg_process),
-                                          ("Goodreads", gr_ok, gr_collect, gr_process)]:
-                if not ok: continue
-                urls = collect(page)
-                if not urls: problem(f"{name}: found 0 giveaways. Layout may have changed.")
-                jobs += [(u, fn) for u in urls]
-            if not tbr.items:
-                problem("No to-read books loaded; skipping entries this run."); jobs = []
+                # Check each giveaway (in random order, to look less robotic)
+                random.shuffle(giveaway_links)
+                for url in giveaway_links:
+                    STATS["inspected"] += 1
+                    try:
+                        result = check_giveaway(page, url, shelf, live, entered)
+                        log(result)
+                        if result.startswith("skip (couldn't read"): STATS["unreadable"] += 1
+                        if result.startswith(("ENTERED", "WOULD ENTER")): STATS["entered"] += 1
+                    except PWTimeout:
+                        log(f"timed out: {url}")
+                        snapshot_once(page, "timed_out")
+                    except Exception as e:
+                        log(f"error on {url}: {e}")
+                    pause()
 
-            random.shuffle(jobs)
-            for url, fn in jobs:
-                STATS["inspected"] += 1
-                try:
-                    result = fn(page, url, tbr, live, entered); log(result)
-                    if result.startswith("skip (couldn't read"): STATS["unreadable"] += 1
-                    if result.startswith(("ENTERED", "WOULD ENTER")): STATS["entered"] += 1
-                except PWTimeout:
-                    log(f"timeout: {url}")
-                    if not _snapshotted_timeout[0]: _snapshotted_timeout[0] = True; snapshot(page, "item_timeout")
-                except Exception as e: log(f"error on {url}: {e}")
-                pause()
-            if STATS["inspected"] >= 5 and STATS["unreadable"] / STATS["inspected"] >= 0.5:
-                problem(f"Couldn't read title/author on {STATS['unreadable']} of {STATS['inspected']} giveaway pages. "
-                        "Selectors likely need updating.")
+                # If most giveaway pages couldn't be read, the layout has probably changed
+                if STATS["inspected"] >= 5 and STATS["unreadable"] / STATS["inspected"] >= 0.5:
+                    problem(f"Couldn't read the title/author on {STATS['unreadable']} of {STATS['inspected']} "
+                            "giveaway pages. The page element finders likely need updating.")
         except Exception:
-            snapshot(page, "run_crash")   # whatever broke, get a picture of what the browser saw at that moment
+            snapshot(page, "run_crashed")      # a picture of what the browser was showing when it broke
             raise
         finally:
-            ctx.close()
+            context.close()
+
+    # Final notifications
     if STATS["problems"]:
-        push("Giveaway bot needs attention", "\n".join("- " + x for x in STATS["problems"]),
+        push("Giveaway bot needs attention", "\n".join("- " + p for p in STATS["problems"]),
              tags=["rotating_light"], priority=4)
-    if SUMMARY:
+    if SEND_SUMMARY:
+        word = "entered" if live else "would enter"
         push("Weekly giveaway run finished",
-             f"Checked {STATS['inspected']} giveaways; {'entered' if live else 'would enter'} {STATS['entered']}."
-             f"{'' if live else ' (dry run)'}", tags=["books"], priority=2)
+             f"Checked {STATS['inspected']} giveaways; {word} {STATS['entered']}." + ("" if live else " (dry run)"),
+             tags=["books"], priority=2)
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--live", action="store_true", help="actually enter (default: dry run)")
-    ap.add_argument("--headed", action="store_true", help="show the browser (use for first login)")
-    ap.add_argument("--daemon", action="store_true", help="loop forever")
-    ap.add_argument("--once", action="store_true", help="single pass (default)")
-    ap.add_argument("--every-hours", type=float, default=168, help="hours between runs in --daemon mode (default: weekly)")
-    ap.add_argument("--test-notify", action="store_true", help="send a sample notification and exit")
-    a = ap.parse_args()
-    if a.test_notify:
-        notify("TEST", "Radicals: Echoes of the First Woman to Run for President", ["Jen Knox"],
-               "Print (hardcover)", "https://app.thestorygraph.com/giveaways/example"); return
+    parser = argparse.ArgumentParser(description="StoryGraph giveaway bot")
+    parser.add_argument("--live", action="store_true", help="really enter giveaways (without this it's a dry run)")
+    parser.add_argument("--headed", action="store_true", help="show the browser window (use this the first time)")
+    parser.add_argument("--once", action="store_true", help="run one time and stop (this is the default)")
+    parser.add_argument("--daemon", action="store_true", help="keep running, repeating on a schedule")
+    parser.add_argument("--every-hours", type=float, default=168, help="with --daemon: hours between runs (default 168 = weekly)")
+    parser.add_argument("--test-notify", action="store_true", help="send a sample phone notification and stop")
+    args = parser.parse_args()
+
+    if args.test_notify:
+        notify_entered("Radicals: Echoes of the First Woman to Run for President", ["Jen Knox"],
+                       "https://app.thestorygraph.com/giveaways/example")
+        return
+
     while True:
-        try: run_once(a.live, a.headed)
+        try:
+            run_once(args.live, args.headed)
         except Exception as e:
-            log(f"run failed: {e}"); push("Giveaway bot crashed", str(e)[:300], tags=["rotating_light"], priority=4)
-        if not a.daemon: break
-        wait = a.every_hours * 3600 * random.uniform(0.9, 1.1)
-        log(f"sleeping {wait/3600:.1f}h"); time.sleep(wait)
+            log(f"run failed: {e}")
+            push("Giveaway bot crashed", str(e)[:300], tags=["rotating_light"], priority=4)
+        if not args.daemon: break
+        wait_seconds = args.every_hours * 3600 * random.uniform(0.9, 1.1)
+        log(f"sleeping {wait_seconds / 3600:.1f} hours")
+        time.sleep(wait_seconds)
 
 if __name__ == "__main__":
     main()
