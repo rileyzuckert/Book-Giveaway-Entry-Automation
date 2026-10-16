@@ -1,5 +1,5 @@
 {
- "latest_version": "1.1.0",
+ "latest_version": "1.2.0",
  "update_url": "",
  "update_note": "",
  "selectors": {
@@ -10,24 +10,10 @@
   "sg_giveaway_link": "a[href*='/giveaways/']",
   "sg_title": "h2 a[href*='/books/'], h1 a[href*='/books/']",
   "sg_enter": "a:has-text('Enter giveaway'), button:has-text('Enter giveaway')",
-  "sg_confirm": "button:has-text('Confirm'), button:has-text('Enter'), input[type=submit][value*='nter']",
+  "sg_confirm_and_enter": "button:has-text('Confirm and Enter'), a:has-text('Confirm and Enter'), [role=button]:has-text('Confirm and Enter'), input[value*='Confirm and Enter']",
   "sg_email_field": "#user_email",
   "sg_password_field": "#user_password",
   "sg_login_submit": "input[type=submit], button[type=submit]",
-  "sg_cookie_accept": "button:has-text('Accept and close'), button:has-text('Accept'), #onetrust-accept-btn-handler",
-  "gr_signed_in": "a[href*='sign_out']",
-  "gr_email_signin": "text=Sign in with email",
-  "gr_amazon_email": "#ap_email",
-  "gr_amazon_password": "#ap_password",
-  "gr_amazon_submit": "#signInSubmit",
-  "gr_tbr_row": "tr.bookalike",
-  "gr_tbr_title": "td.field.title a",
-  "gr_tbr_author": "td.field.author a",
-  "gr_giveaway_link": "a[href*='/giveaway/show/']",
-  "gr_title": "h1",
-  "gr_author": "a[href*='/author/show/']",
-  "gr_enter": "a:has-text('Enter Giveaway'), button:has-text('Enter Giveaway'), input[value*='Enter Giveaway']",
-  "gr_terms": "input[type=checkbox][name*='agree'], input[type=checkbox][id*='agree'], input[type=checkbox][id*='terms']",
-  "gr_submit": "input[type=submit][value*='Enter'], button:has-text('Enter to win'), button:has-text('Enter Giveaway')"
+  "sg_cookie_accept": "button:has-text('Accept and close'), button:has-text('Accept'), #onetrust-accept-btn-handler"
  }
 }
