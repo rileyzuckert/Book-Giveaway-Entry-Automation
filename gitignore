@@ -1,0 +1,11 @@
+# Private or personal files that must never be uploaded to GitHub
+.env
+browser_profile/
+state.json
+giveaway_bot.log
+launchd.log
+launchd.err.log
+debug/
+selectors_cache.json
+update_notified.txt
+__pycache__/
