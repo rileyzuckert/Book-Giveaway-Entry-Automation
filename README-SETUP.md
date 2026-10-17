@@ -171,9 +171,9 @@ These steps haven't been tested by the author.
 | `giveaway_bot.py` | The bot |
 | `selectors.json` | Where to find things on StoryGraph's pages (updated if StoryGraph changes its layout) |
 | `env.example` | Template for your settings |
-| `.env` | Your private settings. You make this. Never share or upload it. |
+| `.env` | Your private settings. You make this. Don't share or upload it |
 | `local-setup/com.giveawaybot.weekly.plist` | Mac weekly schedule file |
 | `giveaway_bot.log` | Diary of what the bot did (created when it runs) |
 | `state.json` | Giveaways already entered (created when it runs) |
-| `browser_profile/` | Your saved StoryGraph login. Treat it like a password. (created when it runs) |
+| `browser_profile/` | Your saved StoryGraph login. Treat it like a password (created when it runs) |
 | `debug/` | Screenshots saved when something goes wrong (created when needed) |
