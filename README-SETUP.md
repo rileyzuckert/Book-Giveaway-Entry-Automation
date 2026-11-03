@@ -153,7 +153,7 @@ These steps haven't been tested by the author.
 3. Don't touch `.env`, `browser_profile`, or `state.json`. They hold your settings, your saved login, and your list of entered giveaways.
 
 # If a Run Fails
-- If the internet isn't back yet (for example, your laptop just woke up), the bot waits up to 10 minutes for it, and tries again up to 3 times, 10 minutes apart.
+- If the internet isn't on (for example, your laptop just woke up), the bot waits up to 10 minutes for it, and tries again up to 3 times, 10 minutes apart.
 - If it still fails, you get a "Giveaway bot crashed" notification and the Mac schedule tries again at the next backup time.
 - To catch up right away, run: python3 giveaway_bot.py --live --once
 
