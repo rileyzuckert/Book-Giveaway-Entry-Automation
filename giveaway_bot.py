@@ -23,15 +23,19 @@ HOW TO RUN (from the folder that holds this file; on Windows use "py" instead of
   Real run, watch the browser:     python3 giveaway_bot.py --live --headed --once
   Real run, hidden browser:        python3 giveaway_bot.py --live --once
   Test the phone notification:     python3 giveaway_bot.py --test-notify
+  Scheduled weekly run:            python3 giveaway_bot.py --live --once --weekly-guard
+    (--weekly-guard lets the schedule try several times a week. The bot skips any extra try
+     once this week's run has finished, so it never does the same work twice.)
 The first time, use --headed so you can sign in and click any "I'm not a robot" box yourself.
 Your login is then saved in the "browser_profile" folder and reused on later runs.
 
 FILES IT CREATES:
   giveaway_bot.log   a record of everything it did, and why it skipped each giveaway
   state.json         the giveaways already entered (so it never enters the same one twice)
+  last_run.json      when the last real run finished (used by --weekly-guard)
   debug/             screenshots saved when something goes wrong
 """
-import argparse, csv, difflib, json, logging, os, random, re, time, urllib.request
+import argparse, csv, datetime, difflib, json, logging, os, random, re, socket, time, urllib.request
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
@@ -59,7 +63,7 @@ load_settings_file()
 # =====================================================================
 # SETTINGS
 # =====================================================================
-VERSION = "1.2.1"
+VERSION = "1.3.0"
 SG_EMAIL = os.environ.get("SG_EMAIL")
 SG_PASSWORD = os.environ.get("SG_PASSWORD")
 SG_USERNAME = os.environ.get("SG_USERNAME")                  # optional
@@ -82,6 +86,7 @@ EXPORT_CSV = "storygraph_export.csv"        # optional backup copy of your to-re
 SELECTORS_FILE = "selectors.json"
 SELECTORS_CACHE = "selectors_cache.json"
 UPDATE_NOTICE_FILE = "update_notified.txt"
+LAST_RUN_FILE = "last_run.json"           # remembers when the last real run finished
 
 # Write messages both to the screen and to the log file
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
@@ -226,6 +231,44 @@ def load_entered():
 
 def save_entered(entered):
     json.dump({"entered": sorted(entered)}, open(STATE_FILE, "w"), indent=1)
+
+# =====================================================================
+# INTERNET CHECK AND "ALREADY RAN THIS WEEK" CHECK
+# =====================================================================
+def wait_for_internet(max_minutes=10):
+    """Wait until the internet works. A laptop that has just woken up can take a minute
+    or two to reconnect to Wi-Fi. Returns True when connected, False if it never connects."""
+    deadline = time.time() + max_minutes * 60
+    while True:
+        try:
+            socket.create_connection(("app.thestorygraph.com", 443), timeout=8).close()
+            return True
+        except OSError:
+            if time.time() >= deadline:
+                return False
+            log("  no internet yet; waiting 15 seconds...")
+            time.sleep(15)
+
+def record_run(status):
+    """Remember when a real run finished and how it went ('ok' or 'needs_attention')."""
+    json.dump({"time": datetime.datetime.now().isoformat(timespec="seconds"), "status": status},
+              open(LAST_RUN_FILE, "w"))
+
+def should_skip_this_run():
+    """Used with --weekly-guard. Skip this try if:
+       - a run already finished OK within the last 6 days, or
+       - a run already finished today but needs your attention (so we don't keep retrying a problem
+         like a verification checkbox that only you can fix)."""
+    try:
+        last = json.load(open(LAST_RUN_FILE))
+        when = datetime.datetime.fromisoformat(last["time"])
+    except Exception:
+        return False
+    if last.get("status") == "ok" and datetime.datetime.now() - when < datetime.timedelta(days=6):
+        return True
+    if last.get("status") == "needs_attention" and when.date() == datetime.date.today():
+        return True
+    return False
 
 # =====================================================================
 # PHONE NOTIFICATIONS (ntfy)
@@ -643,12 +686,37 @@ def run_once(live, headed):
         push("Weekly giveaway run finished",
              f"Checked {STATS['inspected']} giveaways; {word} {STATS['entered']}." + ("" if live else " (dry run)"),
              tags=["books"], priority=2)
+    return "needs_attention" if STATS["problems"] else "ok"
+
+def run_with_retries(live, headed, attempts, retry_minutes):
+    """Run the bot. If something fails (for example the internet isn't back yet after the laptop
+    woke up), wait a few minutes and try again, up to 'attempts' times in total."""
+    for attempt in range(1, attempts + 1):
+        try:
+            if not wait_for_internet():
+                raise RuntimeError("no internet connection")
+            status = run_once(live, headed)
+            if live: record_run(status)
+            return
+        except Exception as e:
+            log(f"attempt {attempt} of {attempts} failed: {e}")
+            if attempt == attempts:
+                push("Giveaway bot crashed",
+                     f"Failed {attempts} times. Last error: {str(e)[:250]}\nIt will try again at its next scheduled time.",
+                     tags=["rotating_light"], priority=4)
+            else:
+                log(f"  trying again in {retry_minutes} minutes")
+                time.sleep(retry_minutes * 60)
 
 def main():
     parser = argparse.ArgumentParser(description="StoryGraph giveaway bot")
     parser.add_argument("--live", action="store_true", help="really enter giveaways (without this it's a dry run)")
     parser.add_argument("--headed", action="store_true", help="show the browser window (use this the first time)")
     parser.add_argument("--once", action="store_true", help="run one time and stop (this is the default)")
+    parser.add_argument("--weekly-guard", action="store_true",
+                        help="skip this try if this week's run already finished (lets a schedule try several times a week)")
+    parser.add_argument("--attempts", type=int, default=3, help="how many times to try if a run fails (default 3)")
+    parser.add_argument("--retry-minutes", type=float, default=10, help="minutes to wait between tries (default 10)")
     parser.add_argument("--daemon", action="store_true", help="keep running, repeating on a schedule")
     parser.add_argument("--every-hours", type=float, default=168, help="with --daemon: hours between runs (default 168 = weekly)")
     parser.add_argument("--test-notify", action="store_true", help="send a sample phone notification and stop")
@@ -660,11 +728,10 @@ def main():
         return
 
     while True:
-        try:
-            run_once(args.live, args.headed)
-        except Exception as e:
-            log(f"run failed: {e}")
-            push("Giveaway bot crashed", str(e)[:300], tags=["rotating_light"], priority=4)
+        if args.weekly_guard and should_skip_this_run():
+            log("skipping this try: this week's run already finished")
+        else:
+            run_with_retries(args.live, args.headed, args.attempts, args.retry_minutes)
         if not args.daemon: break
         wait_seconds = args.every_hours * 3600 * random.uniform(0.9, 1.1)
         log(f"sleeping {wait_seconds / 3600:.1f} hours")
