@@ -9,3 +9,4 @@ debug/
 selectors_cache.json
 update_notified.txt
 __pycache__/
+last_run.json
