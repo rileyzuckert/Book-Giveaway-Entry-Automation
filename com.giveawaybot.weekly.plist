@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.giveawaybot.weekly</string>
+
+    <!-- What to run: Python, then the bot, then three options:
+         live (really enter), once (run one time), weekly-guard (skip if this week's run already finished).
+         The README's steps fill in the REPLACE_ words for you. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>REPLACE_WITH_PYTHON</string>
+        <string>REPLACE_WITH_HOME/giveaway-bot/giveaway_bot.py</string>
+        <string>--live</string>
+        <string>--once</string>
+        <string>--weekly-guard</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>REPLACE_WITH_HOME/giveaway-bot</string>
+
+    <!-- When to try: Monday at 9 AM, with backup tries at 12, 3 and 6 PM, then Tuesday at 9 AM and noon.
+         (Weekday: 1=Mon ... 7=Sun.) The first try that works finishes the week. The bot skips the
+         rest, so the extra times cost nothing. They are there for days when your Mac is asleep,
+         closed, or not online yet at 9 AM. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>15</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict>
+    </array>
+
+    <!-- Where to write messages from the scheduler itself (the bot's own log is giveaway_bot.log) -->
+    <key>StandardOutPath</key>
+    <string>REPLACE_WITH_HOME/giveaway-bot/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>REPLACE_WITH_HOME/giveaway-bot/launchd.err.log</string>
+</dict>
+</plist>
